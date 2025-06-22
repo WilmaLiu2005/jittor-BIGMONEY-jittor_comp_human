@@ -15,7 +15,7 @@ class SimpleSkeletonModel(nn.Module):
         self.feat_dim           = feat_dim
         self.output_channels    = output_channels
         
-        # 使用新的增强Transformer模型，融合了层次化多尺度特征和结构先验知识
+        # 使用新的增强Transformer模型
         self.transformer = SkeletonPoint_Transformer(output_channels=feat_dim)
         self.mlp = nn.Sequential(
             nn.Linear(feat_dim, 512),
