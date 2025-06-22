@@ -1,5 +1,6 @@
 import jittor as jt
-from jittor import nn  
+from jittor import nn
+from jittor import init
 from jittor.contrib import concat
 import numpy as np
 from PCT.misc.ops import FurthestPointSampler
@@ -31,453 +32,468 @@ def sample_and_group(npoint, nsample, xyz, points):
     new_points = concat([grouped_xyz_norm, grouped_points_norm], dim=-1)
     return new_xyz, new_points
 
-class GeodeticDistanceModule(nn.Module):
-    """测地距离特征模块"""
-    def __init__(self, feat_dim, k=16):
+def farthest_point_sample(xyz, npoint):
+    """
+    最远点采样
+    """
+    B, N, C = xyz.shape
+    centroids = jt.zeros((B, npoint), dtype=jt.int32)
+    distance = jt.ones((B, N)) * 1e10
+    farthest = jt.randint(0, N, (B,), dtype=jt.int32)
+    
+    for i in range(npoint):
+        centroids[:, i] = farthest
+        centroid = xyz[jt.arange(B), farthest, :].view(B, 1, 3)
+        dist = jt.sum((xyz - centroid) ** 2, -1)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = jt.argmax(distance, -1, keepdims=False)[0]
+    
+    return centroids
+
+# Point Cloud Serialization - PTv3核心创新
+class PointCloudSerialization(nn.Module):
+    """点云序列化模块 - 基于PTv3的空间填充曲线"""
+    def __init__(self, grid_size=0.02):
         super().__init__()
-        self.k = k
-        self.feat_dim = feat_dim
+        self.grid_size = grid_size
         
-        # 测地距离编码器
-        self.distance_encoder = nn.Sequential(
-            nn.Conv1d(1, feat_dim // 4, 1, bias=False),
-            nn.BatchNorm1d(feat_dim // 4),
-            nn.ReLU(),
-            nn.Conv1d(feat_dim // 4, feat_dim // 2, 1, bias=False),
-            nn.BatchNorm1d(feat_dim // 2),
-            nn.ReLU()
-        )
-        
-        # 局部几何特征提取
-        self.local_geometry_encoder = nn.Sequential(
-            nn.Conv1d(3, feat_dim // 4, 1, bias=False),
-            nn.BatchNorm1d(feat_dim // 4),
-            nn.ReLU(),
-            nn.Conv1d(feat_dim // 4, feat_dim // 2, 1, bias=False),
-            nn.BatchNorm1d(feat_dim // 2),
-            nn.ReLU()
-        )
-        
-        # 特征融合
-        self.feature_fusion = nn.Sequential(
-            nn.Conv1d(feat_dim, feat_dim, 1, bias=False),
-            nn.BatchNorm1d(feat_dim),
-            nn.ReLU()
-        )
-        
-    def compute_geodesic_distance_approx(self, xyz):
-        """近似计算测地距离"""
+    def z_order_encode(self, xyz):
+        """Z-order空间填充曲线编码"""
         B, N, _ = xyz.shape
         
-        # 使用KNN构建局部邻域图
-        idx = knn_point(self.k, xyz, xyz)  # [B, N, k]
-        grouped_xyz = index_points(xyz, idx)  # [B, N, k, 3]
+        # 量化坐标到网格
+        grid_coords = (xyz / self.grid_size).int()
         
-        # 计算欧几里得距离作为测地距离的近似
-        center_xyz = xyz.unsqueeze(2).expand(-1, -1, self.k, -1)  # [B, N, k, 3]
-        distances = jt.norm(grouped_xyz - center_xyz, dim=3)  # [B, N, k]
+        # Z-order编码
+        x, y, z = grid_coords[..., 0], grid_coords[..., 1], grid_coords[..., 2]
         
-        # 取平均距离作为局部测地距离特征
-        geodesic_feat = jt.mean(distances, dim=2, keepdim=True)  # [B, N, 1]
-        
-        return geodesic_feat.permute(0, 2, 1)  # [B, 1, N]
-        
-    def execute(self, xyz, features):
-        """
-        xyz: [B, N, 3] - 点坐标
-        features: [B, C, N] - 输入特征
-        """
-        B, C, N = features.shape
-        
-        # 计算测地距离特征
-        geodesic_dist = self.compute_geodesic_distance_approx(xyz.permute(0, 2, 1))  # [B, 1, N]
-        distance_feat = self.distance_encoder(geodesic_dist)  # [B, feat_dim//2, N]
-        
-        # 计算局部几何特征
-        local_geom_feat = self.local_geometry_encoder(xyz)  # [B, feat_dim//2, N]
-        
-        # 特征融合
-        combined_feat = concat([distance_feat, local_geom_feat], dim=1)  # [B, feat_dim, N]
-        enhanced_feat = self.feature_fusion(combined_feat)  # [B, feat_dim, N]
-        
-        # 与原始特征融合
-        if C == enhanced_feat.shape[1]:
-            output = features + enhanced_feat
-        else:
-            output = concat([features, enhanced_feat], dim=1)
+        # 简化的Z-order编码实现
+        code = jt.zeros_like(x)
+        for i in range(16):  # 假设16位足够
+            mask = 1 << i
+            code |= ((x & mask) << (2*i)) | ((y & mask) << (2*i+1)) | ((z & mask) << (2*i+2))
             
+        return code
+    
+    def hilbert_encode(self, xyz):
+        """Hilbert曲线编码（简化版本）"""
+        # 简化实现，实际应用中可以使用更复杂的Hilbert编码
+        return self.z_order_encode(xyz)
+    
+    def execute(self, xyz, pattern='z'):
+        """
+        执行点云序列化
+        pattern: 'z' for Z-order, 'h' for Hilbert
+        """
+        if pattern == 'z':
+            codes = self.z_order_encode(xyz)
+        elif pattern == 'h':
+            codes = self.hilbert_encode(xyz)
+        else:
+            codes = self.z_order_encode(xyz)
+            
+        # 根据编码排序
+        sorted_indices = jt.argsort(codes, dim=-1)
+        return sorted_indices
+
+# xCPE - PTv3高效位置编码
+class xCPE(nn.Module):
+    """高效条件位置编码 - 基于PTv3设计"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        
+        # 使用1D卷积模拟稀疏卷积
+        self.pos_conv = nn.Sequential(
+            nn.Conv1d(3, out_channels // 2, 1, bias=False),
+            nn.BatchNorm1d(out_channels // 2),
+            nn.ReLU(),
+            nn.Conv1d(out_channels // 2, out_channels, 1, bias=False)
+        )
+        
+        # Skip connection
+        if in_channels != out_channels:
+            self.skip_conv = nn.Conv1d(in_channels, out_channels, 1, bias=False)
+        else:
+            self.skip_conv = None
+            
+    def execute(self, x, xyz):
+        """
+        x: [B, C, N] 特征
+        xyz: [B, 3, N] 坐标
+        """
+        # 位置编码
+        pos_encoding = self.pos_conv(xyz)
+        
+        # Skip connection
+        if self.skip_conv is not None:
+            x = self.skip_conv(x)
+            
+        return x + pos_encoding
+
+# Patch Attention - PTv3核心注意力机制
+class PatchAttention(nn.Module):
+    """基于Patch的注意力机制 - PTv3风格"""
+    def __init__(self, channels, num_heads=8, patch_size=64):
+        super().__init__()
+        self.channels = channels
+        self.num_heads = num_heads
+        self.patch_size = patch_size
+        self.head_dim = channels // num_heads
+        
+        assert channels % num_heads == 0
+        
+        # 简化的dot-product attention
+        self.q_conv = nn.Conv1d(channels, channels, 1, bias=False)
+        self.k_conv = nn.Conv1d(channels, channels, 1, bias=False) 
+        self.v_conv = nn.Conv1d(channels, channels, 1, bias=False)
+        self.out_conv = nn.Conv1d(channels, channels, 1)
+        
+        # 移除未使用的LayerNorm
+        # self.norm = nn.LayerNorm(channels)
+        self.softmax = nn.Softmax(dim=-1)
+        
+    def patch_partition(self, x):
+        """将特征分割为patches"""
+        B, C, N = x.shape
+        
+        # Padding to make N divisible by patch_size
+        pad_size = (self.patch_size - N % self.patch_size) % self.patch_size
+        if pad_size > 0:
+            x = jt.concat([x, x[:, :, :pad_size]], dim=2)
+            
+        N_padded = x.shape[2]
+        num_patches = N_padded // self.patch_size
+        
+        # Reshape to patches: [B, C, num_patches, patch_size]
+        x_patches = x.view(B, C, num_patches, self.patch_size)
+        return x_patches, pad_size
+        
+    def patch_merge(self, x_patches, pad_size, original_N):
+        """合并patches回原始形状"""
+        B, C, num_patches, patch_size = x_patches.shape
+        x = x_patches.view(B, C, -1)
+        
+        # Remove padding
+        if pad_size > 0:
+            x = x[:, :, :-pad_size]
+            
+        return x[:, :, :original_N]
+        
+    def execute(self, x):
+        """
+        x: [B, C, N]
+        """
+        B, C, N = x.shape
+        original_N = N
+        
+        # Patch partition
+        x_patches, pad_size = self.patch_partition(x)  # [B, C, num_patches, patch_size]
+        B, C, num_patches, patch_size = x_patches.shape
+        
+        # Reshape for attention: [B*num_patches, C, patch_size]
+        x_flat = x_patches.view(B * num_patches, C, patch_size)
+        
+        # Compute Q, K, V
+        q = self.q_conv(x_flat)  # [B*num_patches, C, patch_size]
+        k = self.k_conv(x_flat)
+        v = self.v_conv(x_flat)
+        
+        # Multi-head attention
+        q = q.view(B * num_patches, self.num_heads, self.head_dim, patch_size).permute(0, 1, 3, 2)  # [B*num_patches, heads, patch_size, head_dim]
+        k = k.view(B * num_patches, self.num_heads, self.head_dim, patch_size).permute(0, 1, 3, 2)
+        v = v.view(B * num_patches, self.num_heads, self.head_dim, patch_size).permute(0, 1, 3, 2)
+        
+        # Attention scores
+        scores = jt.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.head_dim)  # [B*num_patches, heads, patch_size, patch_size]
+        attention = self.softmax(scores)
+        
+        # Apply attention
+        attended = jt.matmul(attention, v)  # [B*num_patches, heads, patch_size, head_dim]
+        attended = attended.permute(0, 1, 3, 2).contiguous().view(B * num_patches, C, patch_size)
+        
+        # Output projection
+        output = self.out_conv(attended)  # [B*num_patches, C, patch_size]
+        
+        # Reshape back to patches
+        output_patches = output.view(B, C, num_patches, patch_size)
+        
+        # Merge patches
+        output = self.patch_merge(output_patches, pad_size, original_N)
+        
         return output
 
+# Shift Patch Interaction - PTv3 patch交互机制
+class ShiftPatchInteraction(nn.Module):
+    """Shift Patch交互模块"""
+    def __init__(self, channels, patch_size=64):
+        super().__init__()
+        self.channels = channels
+        self.patch_size = patch_size
+        
+        self.attention1 = PatchAttention(channels, patch_size=patch_size)
+        self.attention2 = PatchAttention(channels, patch_size=patch_size)
+        
+    def shift_patches(self, x, shift_size):
+        """移动patches"""
+        B, C, N = x.shape
+        shifted = jt.concat([x[:, :, shift_size:], x[:, :, :shift_size]], dim=2)
+        return shifted
+        
+    def execute(self, x):
+        """
+        x: [B, C, N]
+        """
+        # Standard patch attention
+        out1 = self.attention1(x)
+        
+        # Shifted patch attention
+        shift_size = self.patch_size // 2
+        x_shifted = self.shift_patches(x, shift_size)
+        out2 = self.attention2(x_shifted)
+        out2 = self.shift_patches(out2, -shift_size)  # Shift back
+        
+        return out1 + out2
+
+# PTv3 Style Transformer Block
+class PTv3TransformerBlock(nn.Module):
+    """PTv3风格的Transformer块"""
+    def __init__(self, channels, num_heads=8, patch_size=64, mlp_ratio=4):
+        super().__init__()
+        self.channels = channels
+        
+        # xCPE位置编码
+        self.pos_encoding = xCPE(channels, channels)
+        
+        # Patch attention with shift interaction
+        self.attention = ShiftPatchInteraction(channels, patch_size)
+        
+        # 使用BatchNorm替代LayerNorm避免维度问题
+        self.norm1 = nn.BatchNorm1d(channels)
+        self.norm2 = nn.BatchNorm1d(channels)
+        
+        # MLP
+        mlp_hidden = int(channels * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Conv1d(channels, mlp_hidden, 1),
+            nn.GELU(),
+            nn.Conv1d(mlp_hidden, channels, 1),
+        )
+        
+    def execute(self, x, xyz):
+        """
+        x: [B, C, N] 特征
+        xyz: [B, 3, N] 坐标
+        """
+        # 位置编码
+        x = self.pos_encoding(x, xyz)
+        
+        # Self-attention with residual
+        residual = x
+        x = self.norm1(x)  # [B, C, N] 直接使用BatchNorm1d
+        x = self.attention(x)
+        x = residual + x
+        
+        # MLP with residual
+        residual = x
+        x = self.norm2(x)  # [B, C, N] 直接使用BatchNorm1d
+        x = self.mlp(x)
+        x = residual + x
+        
+        return x
+
+# Skin-specific enhancements
 class SkinWeightSmoothness(nn.Module):
-    """蒙皮权重平滑性约束模块"""
+    """皮肤权重平滑性约束"""
     def __init__(self, num_joints=22, k=8):
         super().__init__()
         self.num_joints = num_joints
         self.k = k
         
-        # 平滑性权重预测器
-        self.smoothness_predictor = nn.Sequential(
-            nn.Conv1d(3, 64, 1, bias=False),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, 1, 1),
-            nn.Sigmoid()
-        )
+        # 移除未使用的smoothness_predictor，直接计算平滑性损失
+        # self.smoothness_predictor = nn.Sequential(
+        #     nn.Conv1d(3, 64, 1, bias=False),
+        #     nn.BatchNorm1d(64),
+        #     nn.ReLU(),
+        # )
         
     def compute_smoothness_loss(self, skin_weights, xyz):
-        """计算蒙皮权重的平滑性损失"""
-        B, N, J = skin_weights.shape
+        """
+        计算平滑性损失
+        skin_weights: [B, N, num_joints] 皮肤权重
+        xyz: [B, N, 3] 点云坐标
+        """
+        B, N, _ = xyz.shape
         
-        # 找到每个点的k近邻
-        idx = knn_point(self.k, xyz, xyz)  # [B, N, k]
+        # 计算k近邻
+        xyz_expanded = xyz.unsqueeze(2)  # [B, N, 1, 3]
+        xyz_tiled = xyz.unsqueeze(1)  # [B, 1, N, 3]
         
-        # 获取邻域内的权重
-        neighbor_weights = index_points(skin_weights, idx)  # [B, N, k, J]
+        # 计算距离矩阵
+        dist_matrix = jt.sum((xyz_expanded - xyz_tiled) ** 2, dim=3)  # [B, N, N]
         
-        # 计算当前点与邻域点权重的差异
-        center_weights = skin_weights.unsqueeze(2).expand(-1, -1, self.k, -1)  # [B, N, k, J]
-        weight_diff = jt.mean((neighbor_weights - center_weights) ** 2, dim=[2, 3])  # [B, N]
+        # 找到k个最近邻（排除自己）
+        _, knn_indices = jt.topk(-dist_matrix, k=self.k+1, dim=2)  # [B, N, k+1]
+        knn_indices = knn_indices[:, :, 1:]  # 排除自己 [B, N, k]
         
-        # 根据几何距离调整平滑性约束强度
-        smoothness_weights = self.smoothness_predictor(xyz.permute(0, 2, 1))  # [B, 1, N]
-        smoothness_weights = smoothness_weights.squeeze(1)  # [B, N]
+        # 获取邻居的皮肤权重
+        batch_indices = jt.arange(B).view(B, 1, 1).expand(B, N, self.k)
+        neighbor_weights = skin_weights[batch_indices, knn_indices]  # [B, N, k, num_joints]
         
-        # 加权平滑性损失
-        smoothness_loss = jt.mean(weight_diff * smoothness_weights)
+        # 计算平滑性损失（当前点权重与邻居权重的差异）
+        current_weights = skin_weights.unsqueeze(2)  # [B, N, 1, num_joints]
+        smoothness_loss = jt.mean((current_weights - neighbor_weights) ** 2)
         
         return smoothness_loss
         
     def execute(self, skin_weights, xyz):
-        """
-        skin_weights: [B, N, J] - 蒙皮权重
-        xyz: [B, N, 3] - 点坐标
-        """
+        """执行平滑性约束计算"""
         return self.compute_smoothness_loss(skin_weights, xyz)
 
-class SkinAttention(nn.Module):
-    """专门针对蒙皮权重预测的注意力机制 - 简化版本"""
-    def __init__(self, feat_dim, num_heads=8):
-        super().__init__()
-        self.feat_dim = feat_dim
-        self.num_heads = num_heads
-        self.head_dim = feat_dim // num_heads
-        
-        assert feat_dim % num_heads == 0
-        
-        # 多头注意力组件
-        self.q_linear = nn.Linear(feat_dim, feat_dim, bias=False)
-        self.k_linear = nn.Linear(feat_dim, feat_dim, bias=False)
-        self.v_linear = nn.Linear(feat_dim, feat_dim, bias=False)
-        self.out_linear = nn.Linear(feat_dim, feat_dim)
-        
-        self.softmax = nn.Softmax(dim=-1)
-        self.dropout = nn.Dropout(0.1)
-        
-    def execute(self, x):
-        B, N, D = x.shape
-        
-        # 计算Q, K, V
-        q = self.q_linear(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_linear(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_linear(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        # 计算注意力分数
-        scores = jt.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.head_dim)
-        attention = self.softmax(scores)
-        attention = self.dropout(attention)
-        
-        # 应用注意力
-        attended = jt.matmul(attention, v)
-        attended = attended.transpose(1, 2).contiguous().view(B, N, D)
-        
-        return self.out_linear(attended)
-
-class ProgressiveSkinAttention(nn.Module):
-    """渐进式蒙皮注意力模块 - 参照pct_new.py实现"""
-    def __init__(self, in_channels, out_channels, num_heads=8):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.num_heads = num_heads
-        self.head_dim = out_channels // num_heads
-        
-        assert out_channels % num_heads == 0
-        
-        # 多头注意力组件
-        self.q_conv = nn.Conv1d(in_channels, out_channels, 1, bias=False)
-        self.k_conv = nn.Conv1d(in_channels, out_channels, 1, bias=False)
-        self.v_conv = nn.Conv1d(in_channels, out_channels, 1)
-        
-        # 位置编码
-        self.pos_encoding = nn.Conv1d(3, out_channels, 1, bias=False)
-        
-        # 输出投影
-        self.output_conv = nn.Conv1d(out_channels, out_channels, 1)
-        self.norm = nn.BatchNorm1d(out_channels)
-        self.relu = nn.ReLU()
-        
-        # 软注意力
-        self.softmax = nn.Softmax(dim=-1)
-        
-    def execute(self, x, xyz):
-        B, C, N = x.shape
-        
-        # 添加位置编码
-        pos_feat = self.pos_encoding(xyz)
-        x_with_pos = x + pos_feat
-        
-        # 计算查询、键、值
-        q = self.q_conv(x_with_pos).view(B, self.num_heads, self.head_dim, N)
-        k = self.k_conv(x_with_pos).view(B, self.num_heads, self.head_dim, N)  
-        v = self.v_conv(x_with_pos).view(B, self.num_heads, self.head_dim, N)
-        
-        # 计算注意力分数
-        attention_scores = jt.matmul(q.transpose(2, 3), k) / np.sqrt(self.head_dim)
-        attention_weights = self.softmax(attention_scores)
-        
-        # 应用注意力
-        attended = jt.matmul(v, attention_weights.transpose(2, 3))
-        attended = attended.view(B, self.out_channels, N)
-        
-        # 输出投影和残差连接
-        output = self.output_conv(attended)
-        if self.in_channels == self.out_channels:
-            output = output + x
-        
-        output = self.relu(self.norm(output))
-        return output
-
-class CrossScaleSkinAttention(nn.Module):
-    """跨尺度蒙皮注意力机制 - 参照pct_new.py实现"""
-    def __init__(self, channels, num_scales=3):
-        super().__init__()
-        self.num_scales = num_scales
-        self.channels = channels
-        
-        # 多尺度查询、键、值投影
-        self.scale_projections = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv1d(channels, channels, 1, bias=False),
-                nn.BatchNorm1d(channels),
-                nn.ReLU()
-            ) for _ in range(num_scales)
-        ])
-        
-        # 跨尺度融合
-        self.cross_scale_fusion = nn.Sequential(
-            nn.Conv1d(channels * num_scales, channels, 1, bias=False),
-            nn.BatchNorm1d(channels),
-            nn.ReLU()
-        )
-        
-        # 使用普通的初始化替代gauss
-        self.attention_weights = jt.randn((num_scales, num_scales)) * 0.1
-        self.softmax = nn.Softmax(dim=-1)
-        
-    def adaptive_resize(self, feat, target_size):
-        """简单的自适应调整尺寸"""
-        current_size = feat.shape[2]
-        if current_size == target_size:
-            return feat
-        elif current_size > target_size:
-            # 下采样
-            step = current_size // target_size
-            return feat[:, :, ::step][:, :, :target_size]
-        else:
-            # 上采样 (简单重复)
-            repeat_factor = target_size // current_size
-            remainder = target_size % current_size
-            upsampled = feat.repeat_interleave(repeat_factor, dim=2)
-            if remainder > 0:
-                upsampled = concat([upsampled, feat[:, :, :remainder]], dim=2)
-            return upsampled[:, :, :target_size]
-        
-    def execute(self, scale_features):
-        """
-        scale_features: list of [B, C, N_i] tensors from different scales
-        """
-        B = scale_features[0].shape[0]
-        target_size = 256  # 统一目标尺寸
-        
-        # 投影每个尺度的特征
-        projected_features = []
-        for i, (feat, proj) in enumerate(zip(scale_features, self.scale_projections)):
-            projected_feat = proj(feat)
-            # 调整到统一尺寸
-            resized_feat = self.adaptive_resize(projected_feat, target_size)
-            projected_features.append(resized_feat)
-        
-        # 跨尺度注意力权重
-        attention_matrix = self.softmax(self.attention_weights)
-        
-        # 融合跨尺度特征
-        fused_features = []
-        for i, feat_i in enumerate(projected_features):
-            weighted_feat = jt.zeros_like(feat_i)
-            for j, feat_j in enumerate(projected_features):
-                weighted_feat += attention_matrix[i, j] * feat_j
-            fused_features.append(weighted_feat)
-        
-        # 最终融合
-        all_features = concat(fused_features, dim=1)
-        final_features = self.cross_scale_fusion(all_features)
-        
-        return final_features
-
-class SkinTransformer(nn.Module):
-    """专门针对蒙皮权重预测的Transformer模型 - 简化版本"""
+# PTv3 Style Skin Transformer
+class PTv3SkinTransformer(nn.Module):
+    """基于PTv3设计的皮肤权重预测Transformer"""
     def __init__(self, output_channels=256, num_joints=22):
         super().__init__()
         self.output_channels = output_channels
         self.num_joints = num_joints
         
-        # 初始特征提取
-        self.initial_conv = nn.Sequential(
-            nn.Conv1d(3, 128, 1, bias=False),
+        # Point cloud serialization
+        self.serialization = PointCloudSerialization()
+        
+        # Initial feature extraction
+        self.stem = nn.Sequential(
+            nn.Conv1d(3, 32, 1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, 1, bias=False),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, 1, bias=False),
             nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, 256, 1, bias=False),
-            nn.BatchNorm1d(256),
             nn.ReLU()
         )
         
-        # 多尺度渐进式特征提取
-        # Level 1: 全分辨率 (1024 points)
-        self.level1_attention = nn.ModuleList([
-            ProgressiveSkinAttention(256, 256, num_heads=8)
-            for _ in range(2)
+        # U-Net style encoder (PTv3风格)
+        self.encoder_layers = nn.ModuleList([
+            # Stage 1: [B, 128, N] -> [B, 128, N]
+            nn.ModuleList([
+                PTv3TransformerBlock(128, patch_size=128),
+                PTv3TransformerBlock(128, patch_size=128)
+            ]),
+            # Stage 2: [B, 256, N//2] -> [B, 256, N//2] 
+            nn.ModuleList([
+                PTv3TransformerBlock(256, patch_size=64),
+                PTv3TransformerBlock(256, patch_size=64)
+            ]),
+            # Stage 3: [B, 512, N//4] -> [B, 512, N//4]
+            nn.ModuleList([
+                PTv3TransformerBlock(512, patch_size=32),
+                PTv3TransformerBlock(512, patch_size=32),
+                PTv3TransformerBlock(512, patch_size=32),
+                PTv3TransformerBlock(512, patch_size=32),
+                PTv3TransformerBlock(512, patch_size=32),
+                PTv3TransformerBlock(512, patch_size=32)
+            ]),
+            # Stage 4: [B, 512, N//8] -> [B, 512, N//8]
+            nn.ModuleList([
+                PTv3TransformerBlock(512, patch_size=16),
+                PTv3TransformerBlock(512, patch_size=16)
+            ])
         ])
         
-        # Level 2: 中等分辨率 (512 points)  
-        self.level2_transform = nn.Conv1d(259, 384, 1, bias=False)
-        self.level2_attention = nn.ModuleList([
-            ProgressiveSkinAttention(384, 384, num_heads=8)
-            for _ in range(3)
+        # Downsampling layers
+        self.downsample_layers = nn.ModuleList([
+            nn.Conv1d(128, 256, 1, bias=False),  # Stage 1->2
+            nn.Conv1d(256, 512, 1, bias=False),  # Stage 2->3  
+            nn.Conv1d(512, 512, 1, bias=False),  # Stage 3->4
         ])
         
-        # Level 3: 低分辨率 (256 points)
-        self.level3_transform = nn.Conv1d(387, 512, 1, bias=False)
-        self.level3_attention = nn.ModuleList([
-            ProgressiveSkinAttention(512, 512, num_heads=8)
-            for _ in range(4)
-        ])
-        
-        # 维度转换层
-        self.dim_reduction_2 = nn.Conv1d(384, 256, 1, bias=False)
-        self.dim_reduction_3 = nn.Conv1d(512, 256, 1, bias=False)
-        
-        # 跨尺度注意力融合
-        self.cross_scale_attention = CrossScaleSkinAttention(
-            channels=256, num_scales=3
-        )
-        
-        # 特征融合和输出
-        self.feature_fusion = nn.Sequential(
-            nn.Conv1d(256, 512, 1, bias=False),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Conv1d(512, 1024, 1, bias=False),
-            nn.BatchNorm1d(1024),
-            nn.ReLU()
-        )
-        
-        # 全局特征提取
-        self.global_feature_extractor = nn.Sequential(
-            nn.Linear(1024, 512),
+        # 替换AdaptiveAvgPool1d为手动实现
+        # self.global_pool = nn.AdaptiveAvgPool1d(1)  # 这行有问题
+        self.final_mlp = nn.Sequential(
+            nn.Linear(512, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(512, output_channels)
         )
         
-    def adaptive_pool_1d(self, x, target_size):
-        """简单的自适应池化实现"""
-        current_size = x.shape[2]
-        if current_size == target_size:
-            return x
-        elif current_size > target_size:
-            if current_size % target_size == 0:
-                kernel_size = current_size // target_size
-                B, C, N = x.shape
-                x_reshaped = x.view(B, C, target_size, kernel_size)
-                return jt.max(x_reshaped, dim=3)
-            else:
-                indices = jt.linspace(0, current_size-1, target_size).long()
-                return x[:, :, indices]
-        else:
-            repeat_factor = target_size // current_size
-            remainder = target_size % current_size
-            upsampled = x.repeat_interleave(repeat_factor, dim=2)
-            if remainder > 0:
-                extra_indices = jt.linspace(0, current_size-1, remainder).long()
-                extra_points = x[:, :, extra_indices]
-                upsampled = concat([upsampled, extra_points], dim=2)
-            return upsampled[:, :, :target_size]
+        # Skin weight smoothness constraint
+        self.smoothness_constraint = SkinWeightSmoothness(num_joints)
+        
+    def global_avg_pool_1d(self, x):
+        """手动实现全局平均池化"""
+        # x: [B, C, N] -> [B, C]
+        return jt.mean(x, dim=2)
+        
+    def grid_pool(self, x, xyz, scale_factor=2):
+        """Grid pooling for downsampling"""
+        B, C, N = x.shape
+        target_N = N // scale_factor
+        
+        # Simple downsampling by taking every scale_factor-th point
+        indices = jt.arange(0, N, scale_factor)[:target_N]
+        
+        downsampled_x = x[:, :, indices]
+        downsampled_xyz = xyz[:, :, indices]
+        
+        return downsampled_x, downsampled_xyz
         
     def execute(self, vertices):
         """
-        vertices: [B, 3, N] - 输入点云
+        vertices: [B, 3, N] 输入点云
         """
         B, _, N = vertices.shape
+        xyz = vertices
         
-        # 初始特征提取
-        x = self.initial_conv(vertices)  # [B, 256, N]
-        xyz = vertices  # [B, 3, N]
+        # Point cloud serialization (可选，用于后续优化)
+        # serialization_indices = self.serialization(xyz.permute(0, 2, 1))
         
-        # Level 1: 全分辨率处理
-        x1 = x
-        for attention_layer in self.level1_attention:
-            x1 = attention_layer(x1, xyz)
+        # Initial feature extraction
+        x = self.stem(vertices)  # [B, 128, N]
         
-        # 下采样到Level 2 (512 points)
-        xyz_512, x1_grouped = sample_and_group(512, 32, xyz.permute(0,2,1), x1.permute(0,2,1))
-        x2 = x1_grouped.mean(dim=2).permute(0, 2, 1)  # [B, 259, 512]
-        x2 = self.level2_transform(x2)  # [B, 384, 512]
+        # Multi-stage encoding
+        stage_features = []
         
-        for attention_layer in self.level2_attention:
-            x2 = attention_layer(x2, xyz_512.permute(0,2,1))
+        for stage_idx, stage_layers in enumerate(self.encoder_layers):
+            # Apply transformer blocks
+            for layer in stage_layers:
+                x = layer(x, xyz)
+            
+            stage_features.append(x)
+            
+            # Downsampling (except for last stage)
+            if stage_idx < len(self.downsample_layers):
+                x = self.downsample_layers[stage_idx](x)
+                x, xyz = self.grid_pool(x, xyz, scale_factor=2)
         
-        # 下采样到Level 3 (256 points)
-        xyz_256, x2_grouped = sample_and_group(256, 32, xyz_512, x2.permute(0,2,1))
-        x3 = x2_grouped.mean(dim=2).permute(0, 2, 1)  # [B, 387, 256]
-        x3 = self.level3_transform(x3)  # [B, 512, 256]
+        # Global feature extraction - 使用手动实现的全局平均池化
+        global_feat = self.global_avg_pool_1d(x)  # [B, 512]
         
-        for attention_layer in self.level3_attention:
-            x3 = attention_layer(x3, xyz_256.permute(0,2,1))
+        # Final prediction
+        output = self.final_mlp(global_feat)  # [B, output_channels]
         
-        # 统一特征维度用于跨尺度注意力
-        x1_pooled = self.adaptive_pool_1d(x1, 256)  # [B, 256, 256]
-        x2_reduced = self.dim_reduction_2(x2)  # [B, 256, 512] 
-        x2_pooled = self.adaptive_pool_1d(x2_reduced, 256)  # [B, 256, 256]
-        x3_reduced = self.dim_reduction_3(x3)  # [B, 256, 256]
-        
-        # 跨尺度注意力融合
-        scale_features = [x1_pooled, x2_pooled, x3_reduced]
-        fused_features = self.cross_scale_attention(scale_features)  # [B, 256, 256]
-        
-        # 特征融合
-        fused_features = self.feature_fusion(fused_features)  # [B, 1024, 256]
-        
-        # 全局池化
-        global_feat = jt.max(fused_features, 2)  # [B, 1024]
-        
-        # 全局特征
-        global_output = self.global_feature_extractor(global_feat)  # [B, output_channels]
-        
-        return global_output
+        return output
+    
+    def compute_smoothness_loss(self, skin_weights, xyz):
+        """计算平滑性约束损失"""
+        return self.smoothness_constraint(skin_weights, xyz)
 
 class SkinPoint_Transformer(nn.Module):
-    """蒙皮权重预测专用Point Transformer，可直接替换EnhancedPoint_Transformer"""
+    """皮肤权重预测的Point Transformer - PTv3风格"""
     def __init__(self, output_channels=256):
         super().__init__()
-        self.skin_transformer = SkinTransformer(
-            output_channels=output_channels, 
-            num_joints=22
-        )
-    
+        self.skin_transformer = PTv3SkinTransformer(output_channels)
+        
     def execute(self, x):
         """
-        x: [B, 3, N] - 输入点云
-        返回: [B, output_channels] - 特征向量
+        x: [B, 3, N] 输入点云坐标
         """
-        return self.skin_transformer(x) 
+        return self.skin_transformer(x)
+    
+    def compute_smoothness_loss(self, skin_weights, xyz):
+        """计算平滑性约束损失"""
+        return self.skin_transformer.compute_smoothness_loss(skin_weights, xyz) 
