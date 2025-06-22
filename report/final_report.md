@@ -1,6 +1,18 @@
 # 计图挑战赛大作业报告 
 **BIGMONEY 战队** 
-刘昕雨 李溪茉 郑皓之
+计32 刘昕雨 2023012166
+计33 李溪茉 2023012254
+计36 郑皓之 2023012168
+
+
+
+## 〇、最终排名
+
+截止 2025.6.22 23:00，BIGMONEY 战队排名为 33/100（33.0%）
+
+<img src="./rank.jpg" alt="rank" style="zoom: 33%;" />
+
+
 
 ## 一、任务分析
 
@@ -14,6 +26,8 @@
 4. 根据模型变化适当调整训练过程中的超参数设置（如学习率、batch size、损失函数权重等）。
 
 **给定的训练集大小是4918，略小**
+
+
 
 ## 二、baseline 分析
 
@@ -170,6 +184,8 @@ Input [B, 3, N]
 skeleton 和 skin 模块都使用了全局 shape latent，但没有显式建模点与关节点之间的几何/空间关系
 **这种方法假设所有点和所有关节之间都有关联，不够稀疏，缺少区域性的偏好建模**
 
+
+
 ## 三、论文阅读
 
 ### 1. **PCT: Point Cloud Transformer**
@@ -303,22 +319,27 @@ skeleton 和 skin 模块都使用了全局 shape latent，但没有显式建模�
 - **效率保障**：
   序列化设计保证感受野扩大时的耗时和显存增加可忽略。
 
+
+
 ## 四、改进方案
 
-### 1. 郑皓之 PCT 改进方案:重新设计架构
+### 0. Enhanced Point Transformer
 
-将 PCT 拆分为 pct_skeleton.py 和 pct_skin.py 两个文件，分别实现了不同的模型架构
+本试验为早期探索阶段进行，性能可达到 62.2486 分，在此不过多阐释：
+
+![enhanced](./enhanced.jpg)
+
+### 1. Skeleton & Skin Point Transformer
+
+分为 pct_skeleton.py 和 pct_skin.py 两个文件，分别实现了不同的模型架构
 
 #### SkeletonTransformer:
 
-1. **多层卷积特征提取**
-   模型以原始点云坐标 `[B, 3, N]` 为输入，通过多层 `Conv1d → BN → ReLU` 逐步提取从低维到高维的几何特征，最终将每个点嵌入到 256 维空间中。
-
-2. **多层自注意力模块（SA_Layer ×4）**
-   核心模块由 4 层自注意力组成，每层包括特征投影、位置编码、QKV 注意力机制及残差连接，用于建模点之间的全局关系并增强结构感知能力。
-
-3. **全局特征聚合与分类头**
-   将注意力模块输出进行融合，利用 Max Pooling 获取全局特征，扩展后与局部特征拼接，通过分类头（由卷积+Dropout 组成）输出每个点云的类别预测 `[B, num_classes]`。
+1. 多层卷积特征提取：模型以原始点云坐标 `[B, 3, N]` 为输入，通过多层 `Conv1d → BN → ReLU` 逐步提取从低维到高维的几何特征，最终将每个点嵌入到 256 维空间中。
+   
+2. 多层自注意力模块（SA_Layer ×4）：核心模块由 4 层自注意力组成，每层包括特征投影、位置编码、QKV 注意力机制及残差连接，用于建模点之间的全局关系并增强结构感知能力。
+   
+3. 全局特征聚合与分类头：将注意力模块输出进行融合，利用 Max Pooling 获取全局特征，扩展后与局部特征拼接，通过分类头（由卷积+Dropout 组成）输出每个点云的类别预测 `[B, num_classes]`。
 
 ```
 Input: [B, 3, N]                                # 原始点云 xyz 坐标
@@ -377,14 +398,11 @@ Output: [B, num_classes]                          # 点云分类结果
 
 #### SkinTransformer:
 
-1. **点云特征提取与自注意力建模**
-   模型首先通过多层卷积（Conv1d + BN + ReLU）将点云几何信息编码为高维特征，随后堆叠 4 层自注意力模块（SA_Layer ×4），引入位置编码并建模点之间的全局关系，提升对局部结构的理解能力。
-
-2. **类别信息引入与特征融合**
-   网络引入物体类别标签作为额外输入，通过卷积嵌入为 `[B, 64, N]` 的特征，与局部点特征和全局特征一起拼接为 `[B, 576, N]`，显式加强语义引导，有助于实现更准确的点级分割。
-
-3. **分割头逐点预测部件类别**
-   拼接后的特征通过多层卷积和 Dropout 构成的分割头进行逐点分类，输出 `[B, num_part_classes, N]`，实现每个点的部件级语义预测，适用于如 ShapeNet 等分割任务。
+1. 点云特征提取与自注意力建模：模型首先通过多层卷积（Conv1d + BN + ReLU）将点云几何信息编码为高维特征，随后堆叠 4 层自注意力模块（SA_Layer ×4），引入位置编码并建模点之间的全局关系，提升对局部结构的理解能力。
+   
+2. 类别信息引入与特征融合：网络引入物体类别标签作为额外输入，通过卷积嵌入为 `[B, 64, N]` 的特征，与局部点特征和全局特征一起拼接为 `[B, 576, N]`，显式加强语义引导，有助于实现更准确的点级分割。
+   
+3. 分割头逐点预测部件类别：拼接后的特征通过多层卷积和 Dropout 构成的分割头进行逐点分类，输出 `[B, num_part_classes, N]`，实现每个点的部件级语义预测，适用于如 ShapeNet 等分割任务。
 
 ```
 Input: [B, 3, N] + [B, 1]                          # 原始点云坐标 + 类别标签
@@ -445,15 +463,16 @@ Output: [B, num_part_classes, N]                  # 每个点的部件类别预�
 
 ```
 
-### 2. 刘昕雨 PCT 改进方案 1：对 Point_Transformer2 做出改进
+### 2. Point_Transformer2 Enhanced
 
 相比原始的 Point_Transformer，Point_Transformer2 在结构设计上进行了显著的改进。首先，它引入了层次化的采样与邻域聚合机制（Sample and Group），使得网络能够更加高效地建模点云的局部几何结构。其次，Point_Transformer2 结合了局部特征提取（Local_op）与全局上下文建模（Point_Transformer_Last），有效融合了不同尺度的语义信息。所以我对原始的 Point_Transformer2 做出了一些改进，用于 skeleton 和 skin 的预测
 我做出的改进有：
-(1)引入多头注意力机制（Multi-Head Self-Attention）：我使用了 MultiHeadSA_Layer，并将其替换到了 Point_Transformer_Last 中的四个注意力模块（sa1~sa4）。每个头独立进行注意力计算后拼接，有助于捕捉特征的多样性与不同的空间关系，提升模型表达能力。
-(2)可学习的位置编码（Learnable Positional Encoding）：原始模型的空间位置通过 xyz_proj 进行线性映射后直接加到特征上，我引入了 多层感知机（pos_mlp）来生成位置编码，使位置嵌入更具表达性并可学习。
-(3)注意力权重和特征 Dropout（增强正则化）：增强了鲁棒性
 
-### 3. 刘昕雨 PCT 改进方案 2：PCT V3
+1. 引入多头注意力机制（Multi-Head Self-Attention）：我使用了 MultiHeadSA_Layer，并将其替换到了 Point_Transformer_Last 中的四个注意力模块（sa1~sa4）。每个头独立进行注意力计算后拼接，有助于捕捉特征的多样性与不同的空间关系，提升模型表达能力。
+2. 可学习的位置编码（Learnable Positional Encoding）：原始模型的空间位置通过 xyz_proj 进行线性映射后直接加到特征上，我引入了 多层感知机（pos_mlp）来生成位置编码，使位置嵌入更具表达性并可学习。
+3. 注意力权重和特征 Dropout（增强正则化）：增强了鲁棒性
+
+### 3. PCTv3 v1:
 
 我在学习的过程中找到了对 PointTransformer 的改进版的论文：Point Transformer V3（第三部分的第二篇论文），于是针对 jittor 框架对其进行了适配和简化，采用在了 skeleton 和 skin 的预测上。
 架构如下：
@@ -518,7 +537,9 @@ Output: [B, output_channels]        # 每个点云样本的分类结果
 
 ```
 
-#### 4. 郑皓之 PCTV3 实现方案：
+### 4. PCTv3 v2：
+
+通过对 PCTV3 论文的学习，进行了另一组与 PCTV3 v1 相平行的 PCTv3 v2 实现：
 
 ```
 Input: [B, 3, N]                     # 原始点云 xyz 坐标
@@ -599,44 +620,51 @@ Output: [B, output_channels]          # 骨骼预测结果（默认256维）
 
 ```
 
-1. **分阶段特征提取与空间结构编码**
-   网络以四阶段编码器逐层提取点云语义特征，通道维度从 128 逐步提升至 512，每阶段均采用 Patch Attention 与 Shift Patch Interaction 构建局部-全局融合的空间关系，同时配合 xCPE 条件位置编码实现几何与语义的高效耦合。
+1. 分阶段特征提取与空间结构编：我使用了四阶段编码器逐层提取点云语义特征，通道维度从 128 逐步提升至 512，每阶段均采用 Patch Attention 与 Shift Patch Interaction 构建局部-全局融合的空间关系，同时配合 xCPE 条件位置编码实现几何与语义的高效耦合。
+   
+2. 高效下采样与全局信息建模：在各阶段之间，通过 Grid Pooling 进行规则下采样，在保持空间结构均匀性的同时压缩计算开销，最终使用 Global Average Pooling 对深层特征进行全局聚合，为后续的骨架参数预测提供稳定、抽象的高维表示。
+   
+3. 骨架参数回归模块实现精确预测：汇聚后的全局特征通过两层全连接网络组成的回归头（带 BN、ReLU、Dropout）输出 `[B, output_channels]` 的骨架参数，具备结构感知性强、鲁棒性高的特点，适用于精细化的人体或物体骨架建模任务。
 
-2. **高效下采样与全局信息建模**
-   各阶段之间通过 Grid Pooling 进行规则下采样，在保持空间结构均匀性的同时压缩计算开销，最终使用 Global Average Pooling 对深层特征进行全局聚合，为后续的骨架参数预测提供稳定、抽象的高维表示。
 
-3. **骨架参数回归模块实现精确预测**
-   汇聚后的全局特征通过两层全连接网络组成的回归头（带 BN、ReLU、Dropout）输出 `[B, output_channels]` 的骨架参数，具备结构感知性强、鲁棒性高的特点，适用于精细化的人体或物体骨架建模任务。
 
 ## 五、实验结果
 
-1. skeleton（郑皓之改进）+ skin（郑皓之改进）
-   超参数设置：两个任务的 learning rate 均是 5e-5，batch_size 设置是 24
-   ![image](./best_1.png)
-   ![image](./best_2.png)
-   ![image](./zhz_v0_score.png)
+1. Skeleton & Skin Point Transformer
 
-2. skeleton（郑皓之改进）+ skin（刘昕雨改进 1）
    超参数设置：两个任务的 learning rate 均是 5e-5，batch_size 设置是 24
-   ![image](./skeleton_1.png)
-   ![image](./skin_1.png)
+
+<img src="./best_1.png" alt="image" style="zoom: 10%;" />
+<img src="./best_2.png" alt="image" style="zoom:10%;" />
+![image](./zhz_v0_score.png)
+
+2. Skeleton Point Transformer & Point_Transformer2 Enhanced
+
+   超参数设置：两个任务的 learning rate 均是 5e-5，batch_size 设置是 24
+   <img src="./skeleton_1.png" alt="image" style="zoom:10%;" />
+   <img src="./skin_1.png" alt="image" style="zoom:10%;" />
    ![image](./final_score_2.png)
    约在七八百 epochs 处收敛
 
-3. skeleton（刘昕雨改进 2）+ skin（刘昕雨改进 2）
+3. PCTV3 v1
+
    超参数设置：skeleton 的 learning rate 是 1e-5，skin 的 learning rate 是 1e-4，batch_size 设置是 16
-   ![image](./skeleton_ptv3.png)
-   ![image](./skin_ptv3.png)
+   <img src="./skeleton_ptv3.png" alt="image" style="zoom:10%;" />
+   <img src="./skin_ptv3.png" alt="image" style="zoom:10%;" />
    约在六七百 epochs 处收敛
    因为这个曲线明显不如前面两种方案好，故没有提交至平台进行测试
 
-4. skeleton（郑皓之ptv3）+ skin（郑皓之ptv3）
+4. PCTV3 v2
+
    超参数设置：skeleton 的 learning rate 是 5e-5，skin 的 learning rate 是 5e-5，batch_size 设置是 16
-   ![image](./zhz_ptv3_1.png)
-   ![image](./zhz_ptv3_2.png)
+   <img src="./zhz_ptv3_1.png" alt="image" style="zoom:10%;" />
+   <img src="./zhz_ptv3_2.png" alt="image" style="zoom:10%;" />
    效果不佳，没有提交至平台
 
-5. skeleton（郑皓之改进）+ skin（郑皓之改进）多参数实验
+5. Skeleton & Skin Point Transformer
+
+   多参数实验：
+
    |组别| skeleton 参数 | skeleton 曲线 |skin 参数 | skin 曲线 |
    |----------------|-----------------|-----------------|---------------|----------|
    |1| batch_size：16 <br> epochs：1500 <br> learning_rate：0.00005 | ![](1.png) |batch_size：16 <br> epochs：1500 <br> learning_rate：0.00005 | ![](2.png) |
@@ -644,90 +672,94 @@ Output: [B, output_channels]          # 骨骼预测结果（默认256维）
    |3| batch_size：24 <br> epochs：1500 <br> learning_rate：0.00005 | ![](5.png) |batch_size：24 <br> epochs：1500 <br> learning_rate：0.00005 | ![](6.png) |
    |4 | batch_size：24 <br> epochs：1000 <br> learning_rate：0.0001 | ![](7.png) |batch_size：24 <br> epochs：1000 <br> learning_rate：0.0001 |![](8.png) |
 
-6. skeleton（刘昕雨改进1 scale up，Transformer block堆到6层）+ skin（刘昕雨改进1 scale up，Transformer block堆到6层）
+6. Point_Transformer2 Enhanced
+
+   Scale up，Transformer block堆到6层
    超参数设置：skeleton 的 learning rate 是 1e-5，skin 的 learning rate 是 1e-4，batch_size 设置是 16
-   ![image](./skeleton_big.png)
-   ![image](./skin_big.png)
+   <img src="./skeleton_big.png" alt="image" style="zoom:10%;" />
+   <img src="./skin_big.png" alt="image" style="zoom:10%;" />
    看起来效果尚佳，但是测试集上的loss大跌眼镜，过拟合了
 
-7. skeleton（郑皓之改进 scale up）+ skin（郑皓之改进 scale up）
+7. Skeleton & Skin Point Transformer：
    超参数设置：skeleton 的 learning rate 是 5e-5，skin 的 learning rate 是 5e-5，batch_size 设置是 16
-   ![image](./zhzscale1.png)
-   ![image](./zhzscale2.png)
+   <img src="./zhzscale1.png" alt="image" style="zoom:10%;" />
+   <img src="./zhzscale2.png" alt="image" style="zoom:10%;" />
    验证集上可以看出过拟合了
+
+
 
 ## 六、实验结果分析
 
 ### 架构对模型性能的影响（做消融实验的cost过大，故分析较为宏观）
 
-#### 郑皓之改进
+Skeleton & Skin Point Transformer：
+
 1. 更深的多层卷积特征提取（Conv1d 3→64→64→128→256）
 原理：
 逐层扩展特征维度，**相当于逐渐从低层几何信息中学习出更加复杂的语义特征。**
 
-性能提升点：
-深层网络 = 更强的表示能力，能学习更复杂的点云局部几何模式。
-每层都有 BN+ReLU，有助于梯度流动与训练稳定。
-抑制了原始两层 Conv1d 提取不足、特征维度不足带来的表达瓶颈。
+- 性能提升点：
+  深层网络 = 更强的表示能力，能学习更复杂的点云局部几何模式。
+  每层都有 BN+ReLU，有助于梯度流动与训练稳定。
+  抑制了原始两层 Conv1d 提取不足、特征维度不足带来的表达瓶颈。
 
 2. 更标准、更稳定的 Transformer 架构（SA_Layer 改进）
 原理：
 将自注意力模块从 PCT 的“简化版”升级为**更接近标准 Transformer**的 Q-K-V + sin-cos 位置编码 + LayerNorm 结构。
 
-性能提升点：
-QKV 显式学习表示之间的关系，增强了点间的依赖建模能力（非局部建模）。
-sin-cos 位置编码优于 xyz 直接映射，在空间建模中更具有归纳偏置（与 NLP/ViT 一致）。
-残差连接 + LayerNorm 提高深层训练稳定性，防止退化和梯度爆炸/消失。
-整体注意力模块表达能力增强，对复杂结构（如空心物体、非均匀点）更敏感。
+- 性能提升点：
+  QKV 显式学习表示之间的关系，增强了点间的依赖建模能力（非局部建模）。
+  sin-cos 位置编码优于 xyz 直接映射，在空间建模中更具有归纳偏置（与 NLP/ViT 一致）。
+  残差连接 + LayerNorm 提高深层训练稳定性，防止退化和梯度爆炸/消失。
+  整体注意力模块表达能力增强，对复杂结构（如空心物体、非均匀点）更敏感。
 
 3. 全局特征与局部特征融合策略（Global + Local Feature Fusion）
 原理：
 不是只用 MaxPool 提取全局语义，而是将其**与局部特征联合拼接，强化点的上下文感知**。
 
-性能提升点：
-每个点不仅看自己的局部特征，还能“看到全局”，提升了分类/分割的判别能力。
-特别对结构相似但语义不同的类别有更好区分能力。
+- 性能提升点：
+  每个点不仅看自己的局部特征，还能“看到全局”，提升了分类/分割的判别能力。
+  特别对结构相似但语义不同的类别有更好区分能力。
 
 4. 改进后的输出结构（Conv1d + Dropout 替代 MLP）
 原理：
 **全连接层替换为 Conv1d + Dropout**，具备空间共享参数的能力，且更轻量。
 
-性能提升点：
-Conv1d 本质上是 1×1 卷积，可视为 MLP 的高效实现，但支持批处理更好。
-Dropout 提升泛化能力，防止过拟合。
-整体减少参数、提升训练稳定性与效率。
+- 性能提升点：
+  Conv1d 本质上是 1×1 卷积，可视为 MLP 的高效实现，但支持批处理更好。
+  Dropout 提升泛化能力，防止过拟合。
+  整体减少参数、提升训练稳定性与效率。
 
-#### 刘昕雨改进1 
-1. 引入多头注意力机制（Multi-Head Self-Attention）
-原理对比：
-原始 Point_Transformer2 中每层注意力模块只使用 单一头（Single-Head），这种方式只能从一个角度建模点之间的关系。
-改进后使用 **Multi-Head Self-Attention**，每个头独立学习不同的注意力权重。
+5. 引入多头注意力机制（Multi-Head Self-Attention）
+   原理对比：
+   原始 Point_Transformer2 中每层注意力模块只使用 单一头（Single-Head），这种方式只能从一个角度建模点之间的关系。
+   改进后使用 **Multi-Head Self-Attention**，每个头独立学习不同的注意力权重。
 
-性能提升原因：
-多头机制 = 多视角捕捉点间的空间关系，每个头可以关注不同的局部或非局部结构特征。
-能够更好地捕捉复杂空间结构，如物体的对称性、细节区域等。
-与自然语言处理中的 Transformer 一样，多头机制是扩展表示力的核心手段。
-对于点云这样结构不规则、不连续的数据，Multi-Head Attention 更能适应其多样性和非均匀性。
+- 性能提升原因：
+  多头机制 = 多视角捕捉点间的空间关系，每个头可以关注不同的局部或非局部结构特征。
+  能够更好地捕捉复杂空间结构，如物体的对称性、细节区域等。
+  与自然语言处理中的 Transformer 一样，多头机制是扩展表示力的核心手段。
+  对于点云这样结构不规则、不连续的数据，Multi-Head Attention 更能适应其多样性和非均匀性。
 
-2. 可学习的位置编码（Learnable Positional Encoding）
-原理对比：
-原始 Point_Transformer2 使用的是简单的 xyz 坐标线性映射（xyz_proj）作为位置偏置。
-改进后使用一个**MLP（pos_mlp）**从点间相对位置学习更复杂的位置嵌入。
+6. 可学习的位置编码（Learnable Positional Encoding）
+   原理对比：
+   原始 Point_Transformer2 使用的是简单的 xyz 坐标线性映射（xyz_proj）作为位置偏置。
+   改进后使用一个**MLP（pos_mlp）**从点间相对位置学习更复杂的位置嵌入。
 
-性能提升原因：
-xyz_proj 是一个静态、线性的映射，学习能力有限，可能无法充分建模复杂的空间分布。
-Learnable Position Embedding 通过非线性 MLP 可以捕捉更复杂的空间关系（如非欧几里得结构、曲面内邻接关系）。
-相当于从「生硬的几何偏置」→「可学习的几何表达」，更具灵活性和适应性。
-在形状、密度变化大的数据集（如 ScanNet、ShapeNetPart）中尤为重要。
-提升了模型的空间感知能力，让注意力更精准地聚焦在具有语义意义的位置上。
+- 性能提升原因：
+  xyz_proj 是一个静态、线性的映射，学习能力有限，可能无法充分建模复杂的空间分布。
+  Learnable Position Embedding 通过非线性 MLP 可以捕捉更复杂的空间关系（如非欧几里得结构、曲面内邻接关系）。
+  相当于从「生硬的几何偏置」→「可学习的几何表达」，更具灵活性和适应性。
+  在形状、密度变化大的数据集（如 ScanNet、ShapeNetPart）中尤为重要。
+  提升了模型的空间感知能力，让注意力更精准地聚焦在具有语义意义的位置上。
 
-3. 注意力权重和特征 Dropout（增强正则化）
-原理对比：
-改进在注意力机制中加入 Dropout，对注意力得分矩阵和中间特征进行随机失活。
+7. 注意力权重和特征 Dropout（增强正则化）
+   原理对比：
+   改进在注意力机制中加入 Dropout，对注意力得分矩阵和中间特征进行随机失活。
 
-性能提升原因：
-减少模型依赖特定注意力路径，降低过拟合风险。
-让注意力机制在训练时更具有泛化性，对不同点云扰动具有更强鲁棒性。
+- 性能提升原因：
+  减少模型依赖特定注意力路径，降低过拟合风险。
+  让注意力机制在训练时更具有泛化性，对不同点云扰动具有更强鲁棒性。
 
 #### 两个PTV3改进相比于前面两个改进的负优化分析
 1. 任务适配性不足
@@ -735,47 +767,40 @@ Learnable Position Embedding 通过非线性 MLP 可以捕捉更复杂的空间�
 Point Transformer V3 原本是为点云分类、语义分割任务设计的通用结构，它注重提取全局语义。
 而 skeleton 和 skin 预测是结构回归任务，更强调精细的空间结构与几何连贯性，对局部结构保留要求非常高。
 
-结果影响：
-**PCTv3 多次下采样、特征抽象太强，导致局部几何信息丢失严重，不适合这种需要精细回归的任务**。
-复杂全局建模反而带来了噪声与过度拟合，不利于细节特征保留。
+- 结果影响：
+  **PCTv3 多次下采样、特征抽象太强，导致局部几何信息丢失严重，不适合这种需要精细回归的任务**。
+  复杂全局建模反而带来了噪声与过度拟合，不利于细节特征保留。
 
 2. 模型过重、特征过深
 问题点：
 两个版本都采用了多个 Stage，每层还有大 MLP（例如 512→2048）。
 通道数从 64→128→256→512，模型规模指数级增长，参数量和计算复杂度极高。
 
-结果影响：
-对于小规模任务（如骨架预测的数据集通常较小），模型容量严重过大，训练不充分，导致欠拟合或梯度不稳定。
-学习过程难以收敛或陷入局部最优，精度下降。
-反而不如前面那些轻量级模型（结构浅、局部增强）来的有效。
+- 结果影响：
+  对于小规模任务（如骨架预测的数据集通常较小），模型容量严重过大，训练不充分，导致欠拟合或梯度不稳定。
+  学习过程难以收敛或陷入局部最优，精度下降。
+  反而不如前面那些轻量级模型（结构浅、局部增强）来的有效。
 
 3. 过多的 Patch 划分和 Shift 操作引入噪声
 问题点：
 PCTv3 的核心机制是划分 Patch（128 → 64 → 32 → 16）+ Shift Patch Interaction。
 对点云不断划分、重组，试图增强局部到全局的信息流动。
 
-结果影响：
-在语义分割这类类别稳定的任务中，这种方法有利。
-但**在结构预测任务中，它会打乱原始几何结构的连续性，导致结果“不光滑”、“跳跃性强”。**
-skeleton 的连续性和 skin 的形变依赖于稳定的局部邻域，这种打散式 patch 操作会破坏空间一致性。
+- 结果影响：
+  在语义分割这类类别稳定的任务中，这种方法有利。
+  但**在结构预测任务中，它会打乱原始几何结构的连续性，导致结果“不光滑”、“跳跃性强”。**
+  skeleton 的连续性和 skin 的形变依赖于稳定的局部邻域，这种打散式 patch 操作会破坏空间一致性。
 
 4. 条件位置编码过于复杂且训练不足
 问题点：
 所谓的 xCPE（条件位置编码）实际上是一个深度感知位置的卷积网络。
 它并非简单相对位置，而是尝试用多层感知结构建模位置编码。
 
-结果影响：
-在数据量小、任务结构明确（如骨架预测）中，这种复杂位置编码反而学不到通用的位置偏置。
-**模型训练不充分时，xCPE 会给注意力引入不稳定的几何信号**，影响最终精度。
+- 结果影响：
+  在数据量小、任务结构明确（如骨架预测）中，这种复杂位置编码反而学不到通用的位置偏置。
+  **模型训练不充分时，xCPE 会给注意力引入不稳定的几何信号**，影响最终精度。
 
-5. 错误的归一化与残差设计
-问题点：
-多处使用了 BatchNorm，而 BatchNorm 在点云任务中往往效果不佳（尤其是 batch size 小、数据不稳定时）。
-LayerNorm 更适合 Transformer 模型，但在实现中并未统一采用。
-双重残差和前馈层过多也可能造成 信息混叠，梯度难以传递。
 
-结果影响：
-模型难以稳定收敛，且深层特征可能退化为冗余表示。
 
 #### scale up的负优化分析
 问题点1：数据不够，但是模型很大，于是过拟合
@@ -796,29 +821,52 @@ LayerNorm 更适合 Transformer 模型，但在实现中并未统一采用。
 不过理论上，小batch size的效果更好，泛化能力更强。
 
 #### epoch
-训练时epoch统一设置为1000epoch
-刘昕雨的模型一般六七百个epoch收敛，郑皓之的模型一般八九百个epoch收敛
+训练时epoch统一设置为1000epoch，一般600-800个epoch收敛
 
 #### optimizer
 浅浅尝试过RMSProp（维护每个参数梯度平方的指数加权移动平均），不如adam（一阶矩估计 + 二阶矩估计）
 还尝试过Lion（使用符号梯度sign of momentum来指导参数更新），但是jittor框架中没有实现，自己实现之后debug困难，故放弃。
 
+
+
 ## 七、一些心得和感想
+
 1. **Dropout 不能乱设，加 Dropout 太多会underfit，显著降低得分**
 2. A100 的训练速度竟然不如 4090，始终没有想明白是为什么
 3. **jittor 下一步应该跟进支持多卡训练，否则训练的速度太慢，一训训一天**
 4. 感觉best_model.pkl的选取并不完美（看验证集效果，但见前文：感觉验证集和训练集的分布较为接近，与测试集的分布则较为不同），但是暂时想不到其余的办法
 5. 我从同学处得知了还可以进行**数据增强**的操作，但是没有琢磨出来怎么干
 6. 比较遗憾，我没有来得及使用**可视化**来对模型进行调整
-7. 每天提交次数限制两次增加了模型训练的难度
+7. 每天提交次数限制两次增加了模型训练的难度，训练后无法直接在本地计算与分数相关的 loss
 8. 投身于大作业的时间大约为两周，可惜没有把分数提得更高，有点遗憾，不过这让我进一步认识到了模型训练的困难
 9. 听说其他同学用ptv3的改进冲到了75分，十分想知道他们是如何实现的
 
+
+
 ## 八、实验分工
-架构设计（刘昕雨5、郑皓之5）
-调参训练（刘昕雨3、李溪茉3、郑皓之3）
-实验报告（刘昕雨6、李溪茉4）
+
+郑皓之：
+1. 实验初期架构探索，多种架构的初期研究，同时为实验框架引入 loss 曲线绘制与多参数调节
+2. 实现三种改进方案：Enhanced Point Transformer（对 PointTransformer2 的改进，探索较早期，并未列出于实验报告中，实测可达到 62.2486 分），Skeleton & Skin Point Transformer，阅读论文并实现 PointTransformerV3
+3. 实验调参
+4. 检查完善实验报告
+
+刘昕雨：
+1. 查找并阅读两篇实验相关的论文
+2. 设计两种改进方案：PointTransformer2的改进和PointTransformerV3在jittor框架中的适配实现
+3. 进行实验调参，主要测试了epoch、batch size、learning rate和optimizer等超参数对模型性能的影响
+4. 将代码进行整理后开源到Gitlink和GitHub上
+5. 撰写实验报告的主要框架与主体内容
+
+李溪茉：
+
+1. 探索并梳理多尺度分层框架结构，形成可复用的设计思路
+2. 进行多参数实验：系统评估 epoch、batch size、learning rate、optimizer 等超参数对模型性能的影响
+3. 实验报告撰写：完成模型架构分析与图表整理，并对报告排版细节进行优化
+4. 开源前对项目代码进行完善与整理
+
+
 
 ## 九、开源网址
-github：
-gitlink：
+github：https://github.com/WilmaLiu2005/jittor-BIGMONEY-jittor_comp_human.git
+gitlink：https://gitlink.org.cn/VinceLiu/skeleton_skin.git
