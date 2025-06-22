@@ -207,12 +207,10 @@ class MultiHeadSA_Layer(nn.Module):
         self.num_heads = num_heads
         self.head_dim = channels // num_heads
 
-        # 多头的qkv
         self.q_conv = nn.Conv1d(channels, channels, 1, bias=False)
         self.k_conv = nn.Conv1d(channels, channels, 1, bias=False)
         self.v_conv = nn.Conv1d(channels, channels, 1, bias=False)
 
-        # 可学习的位置编码
         self.pos_mlp = nn.Sequential(
             nn.Conv1d(3, channels, 1, bias=False),
             nn.BatchNorm1d(channels),
@@ -229,35 +227,29 @@ class MultiHeadSA_Layer(nn.Module):
 
     def execute(self, x, xyz):
         B, C, N = x.shape
-        # 可学习的位置编码
         pos_enc = self.pos_mlp(xyz)  # [B, C, N]
         x = x + pos_enc
 
-        # 生成qkv
         q = self.q_conv(x)  # [B, C, N]
         k = self.k_conv(x)  # [B, C, N]
         v = self.v_conv(x)  # [B, C, N]
 
-        # 拆分多头
         q = q.view(B, self.num_heads, self.head_dim, N)  # [B, num_heads, head_dim, N]
         k = k.view(B, self.num_heads, self.head_dim, N)
         v = v.view(B, self.num_heads, self.head_dim, N)
 
-        # 计算注意力
         q = q.permute(0, 1, 3, 2)  # [B, num_heads, N, head_dim]
         k = k  # [B, num_heads, head_dim, N]
         attn = jt.bmm(q.reshape(-1, N, self.head_dim), k.reshape(-1, self.head_dim, N))  # [B*num_heads, N, N]
         attn = self.softmax(attn)
-        attn = self.dropout_attn(attn)  # 对注意力分布做Dropout
+        attn = self.dropout_attn(attn) 
         attn = attn / (1e-9 + attn.sum(dim=1, keepdims=True))
 
-        # 加权求和
         v = v.permute(0, 1, 3, 2).reshape(-1, N, self.head_dim)  # [B*num_heads, N, head_dim]
         out = jt.bmm(attn, v)  # [B*num_heads, N, head_dim]
         out = out.reshape(B, self.num_heads, N, self.head_dim).permute(0, 1, 3, 2).reshape(B, C, N)
-        out = self.dropout_feat(out)  # Dropout在残差前
-        
-        # 残差和后处理
+        out = self.dropout_feat(out)
+
         out = self.act(self.after_norm(self.trans_conv(x - out)))
         x = x + out
         return x
@@ -273,7 +265,7 @@ class SA_Layer(nn.Module):
         self.after_norm = nn.BatchNorm1d(channels)
         self.act = nn.ReLU()
         self.softmax = nn.Softmax(dim=-1)
-        # Add a projection for xyz coordinates
+
         self.pos_mlp = nn.Sequential(
             nn.Conv1d(3, channels, 1, bias=False),
             nn.BatchNorm1d(channels),
@@ -282,7 +274,7 @@ class SA_Layer(nn.Module):
         )
 
     def execute(self, x, xyz):
-        # 可学习的位置编码
+
         pos_enc = self.pos_mlp(xyz)  # [B, channels, N]
         x = x + pos_enc
         
