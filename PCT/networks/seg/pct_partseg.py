@@ -74,15 +74,55 @@ class SA_Layer(nn.Module):
         self.after_norm = nn.BatchNorm1d(channels)
         self.act = nn.ReLU()
         self.softmax = nn.Softmax(dim=-1)
+        # sin-cos 编码参数
+        self.num_pos_feats = channels  # 可调：也可设为 channels // 2
+    
+    # 加入位置编码
+    def sinusoidal_positional_encoding(self, coords, num_feats):
+        """
+        coords: [B, 3, N]
+        return: [B, num_feats, N]
+        """
+        B, _, N = coords.shape
+        # 生成不同的 频率尺度（wave-length），确保每个维度有不同的频率
+        div_term = jt.exp(jt.arange(0, num_feats, 2).float() * -(math.log(10000.0) / num_feats))
+        div_term = div_term.view(1, 1, -1, 1)  # [1, 1, C//2, 1]
+        coords = coords.unsqueeze(2)  # [B, 3, 1, N]
+
+        pe = jt.zeros((B, 3, num_feats, N))
+        for i in range(3):  # xyz，第奇数维用 cos，第偶数维用 sin
+            pe[:, i, 0::2, :] = jt.sin(coords[:, i:i+1, :, :] * div_term)
+            pe[:, i, 1::2, :] = jt.cos(coords[:, i:i+1, :, :] * div_term)
+        pe = pe.view(B, -1, N)  # [B, 3*num_feats, N]
+        return pe
 
     def execute(self, x):
-        x_q = self.q_conv(x).permute(0, 2, 1) # b, n, c 
-        x_k = self.k_conv(x)# b, c, n        
+        B, C, N = x.shape
+
+        coords = x[:, :3, :]  # [B, 3, N]
+
+        # 生成 sin-cos 编码
+        pos_enc = self.sinusoidal_positional_encoding(coords, num_feats=C // 3)
+        # 截断或投影编码维度以匹配输入特征
+        if pos_enc.shape[1] > C:
+            pos_enc = pos_enc[:, :C, :]
+        elif pos_enc.shape[1] < C:
+            pad = jt.zeros((B, C - pos_enc.shape[1], N))
+            pos_enc = jt.concat([pos_enc, pad], dim=1)
+
+        # 加入位置编码
+        x_pe = x + pos_enc
+
+        # 标准注意力路径
+        x_q = self.q_conv(x_pe).permute(0, 2, 1)
+        x_k = self.k_conv(x_pe)
         x_v = self.v_conv(x)
-        energy = nn.bmm(x_q, x_k) # b, n, n 
+
+        energy = jt.bmm(x_q, x_k)
         attention = self.softmax(energy)
         attention = attention / (1e-9 + attention.sum(dim=1, keepdims=True))
-        x_r = nn.bmm(x_v, attention) # b, c, n 
+
+        x_r = jt.bmm(x_v, attention)
         x_r = self.act(self.after_norm(self.trans_conv(x - x_r)))
         x = x + x_r
         return x

@@ -1,11 +1,10 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 import jittor as jt
 import numpy as np
+
 import argparse
 import time
 import random
-import matplotlib.pyplot as plt
 
 from jittor import nn
 from jittor import optim
@@ -14,9 +13,9 @@ from dataset.dataset import get_dataloader, transform
 from dataset.format import id_to_name
 from dataset.sampler import SamplerMix
 from models.skin import create_model
-from models.new_skin import create_model1
 
 from dataset.exporter import Exporter
+import matplotlib.pyplot as plt
 
 # Set Jittor flags
 jt.flags.use_cuda = 1
@@ -98,12 +97,6 @@ def train(args):
     # Set up logging
     log_file = os.path.join(args.output_dir, 'training_log.txt')
     
-    def log_message(message):
-        """Helper function to log messages to file and print to console"""
-        with open(log_file, 'a') as f:
-            f.write(f"{message}\n")
-        print(message)
-    
     # Initialize lists to store training history for plotting
     train_losses_mse = []
     train_losses_l1 = []
@@ -111,18 +104,21 @@ def train(args):
     val_losses_l1 = []
     epochs_logged = []
     
+    def log_message(message):
+        """Helper function to log messages to file and print to console"""
+        with open(log_file, 'a') as f:
+            f.write(f"{message}\n")
+        print(message)
+    
     # Log training parameters
     log_message(f"Starting training with parameters: {args}")
     
     # Create model
-    model = create_model1(
+    model = create_model(
         model_name=args.model_name,
     )
     
-    # Load pre-trained model if specified
-    if args.pretrained_model:
-        log_message(f"Loading pretrained model from {args.pretrained_model}")
-        model.load(args.pretrained_model)
+    start_epoch = 0
     
     # Create optimizer
     if args.optimizer == 'sgd':

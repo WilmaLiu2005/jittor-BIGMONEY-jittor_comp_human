@@ -41,7 +41,7 @@ class Point_Transformer2(nn.Module):
         self.gather_local_0 = Local_op(in_channels=128, out_channels=128)
         self.gather_local_1 = Local_op(in_channels=256, out_channels=256)
         self.pt_last = Point_Transformer_Last()
-        
+
         self.relu = nn.ReLU()
         self.conv_fuse = nn.Sequential(nn.Conv1d(1280, 1024, kernel_size=1, bias=False),
                                    nn.BatchNorm1d(1024),
@@ -93,10 +93,10 @@ class Point_Transformer(nn.Module):
         self.bn1 = nn.BatchNorm1d(128)
         self.bn2 = nn.BatchNorm1d(128)
 
-        self.sa1 = MultiHeadSA_Layer(128, num_heads=8)
-        self.sa2 = MultiHeadSA_Layer(128, num_heads=8)
-        self.sa3 = MultiHeadSA_Layer(128, num_heads=8)
-        self.sa4 = MultiHeadSA_Layer(128, num_heads=8)
+        self.sa1 = SA_Layer(128)
+        self.sa2 = SA_Layer(128)
+        self.sa3 = SA_Layer(128)
+        self.sa4 = SA_Layer(128)
 
         self.conv_fuse = nn.Sequential(nn.Conv1d(512, 1024, kernel_size=1, bias=False),
                                    nn.BatchNorm1d(1024),
@@ -147,14 +147,14 @@ class Point_Transformer_Last(nn.Module):
     def __init__(self, channels=256):
         super(Point_Transformer_Last, self).__init__()
         self.conv1 = nn.Conv1d(channels, channels, kernel_size=1, bias=False)
-        # self.conv_pos = nn.Conv1d(3, channels, kernel_size=1, bias=False)
+        self.conv_pos = nn.Conv1d(3, channels, kernel_size=1, bias=False)
 
         self.bn1 = nn.BatchNorm1d(channels)
 
-        self.sa1 = MultiHeadSA_Layer(channels, num_heads=8)
-        self.sa2 = MultiHeadSA_Layer(channels, num_heads=8)
-        self.sa3 = MultiHeadSA_Layer(channels, num_heads=8)
-        self.sa4 = MultiHeadSA_Layer(channels, num_heads=8)
+        self.sa1 = SA_Layer(channels)
+        self.sa2 = SA_Layer(channels)
+        self.sa3 = SA_Layer(channels)
+        self.sa4 = SA_Layer(channels)
 
         self.relu = nn.ReLU()
     def execute(self, x, xyz):
@@ -166,7 +166,7 @@ class Point_Transformer_Last(nn.Module):
         batch_size, _, N = x.size()
         # add position embedding
         xyz = xyz.permute(0, 2, 1)
-
+        xyz = self.pos_xyz(xyz)
         # end
         x = self.relu(self.bn1(self.conv1(x))) # B, D, N
 
@@ -200,67 +200,7 @@ class Local_op(nn.Module):
         x = x.reshape(b, n, -1).permute(0, 2, 1)
         return x
 
-class MultiHeadSA_Layer(nn.Module):
-    def __init__(self, channels, num_heads=4, attn_dropout=0.1, feat_dropout=0.1):
-        super(MultiHeadSA_Layer, self).__init__()
-        assert channels % num_heads == 0, "channels必须能被num_heads整除"
-        self.num_heads = num_heads
-        self.head_dim = channels // num_heads
 
-        # 多头的qkv
-        self.q_conv = nn.Conv1d(channels, channels, 1, bias=False)
-        self.k_conv = nn.Conv1d(channels, channels, 1, bias=False)
-        self.v_conv = nn.Conv1d(channels, channels, 1, bias=False)
-
-        # 可学习的位置编码
-        self.pos_mlp = nn.Sequential(
-            nn.Conv1d(3, channels, 1, bias=False),
-            nn.BatchNorm1d(channels),
-            nn.ReLU(),
-            nn.Conv1d(channels, channels, 1, bias=False)
-        )
-
-        self.trans_conv = nn.Conv1d(channels, channels, 1)
-        self.after_norm = nn.BatchNorm1d(channels)
-        self.act = nn.ReLU()
-        self.softmax = nn.Softmax(dim=-1)
-        self.dropout_attn = nn.Dropout(attn_dropout)
-        self.dropout_feat = nn.Dropout(feat_dropout)
-
-    def execute(self, x, xyz):
-        B, C, N = x.shape
-        # 可学习的位置编码
-        pos_enc = self.pos_mlp(xyz)  # [B, C, N]
-        x = x + pos_enc
-
-        # 生成qkv
-        q = self.q_conv(x)  # [B, C, N]
-        k = self.k_conv(x)  # [B, C, N]
-        v = self.v_conv(x)  # [B, C, N]
-
-        # 拆分多头
-        q = q.view(B, self.num_heads, self.head_dim, N)  # [B, num_heads, head_dim, N]
-        k = k.view(B, self.num_heads, self.head_dim, N)
-        v = v.view(B, self.num_heads, self.head_dim, N)
-
-        # 计算注意力
-        q = q.permute(0, 1, 3, 2)  # [B, num_heads, N, head_dim]
-        k = k  # [B, num_heads, head_dim, N]
-        attn = jt.bmm(q.reshape(-1, N, self.head_dim), k.reshape(-1, self.head_dim, N))  # [B*num_heads, N, N]
-        attn = self.softmax(attn)
-        attn = self.dropout_attn(attn)  # 对注意力分布做Dropout
-        attn = attn / (1e-9 + attn.sum(dim=1, keepdims=True))
-
-        # 加权求和
-        v = v.permute(0, 1, 3, 2).reshape(-1, N, self.head_dim)  # [B*num_heads, N, head_dim]
-        out = jt.bmm(attn, v)  # [B*num_heads, N, head_dim]
-        out = out.reshape(B, self.num_heads, N, self.head_dim).permute(0, 1, 3, 2).reshape(B, C, N)
-        out = self.dropout_feat(out)  # Dropout在残差前
-        
-        # 残差和后处理
-        out = self.act(self.after_norm(self.trans_conv(x - out)))
-        x = x + out
-        return x
 
 class SA_Layer(nn.Module):
     def __init__(self, channels):
@@ -274,17 +214,14 @@ class SA_Layer(nn.Module):
         self.act = nn.ReLU()
         self.softmax = nn.Softmax(dim=-1)
         # Add a projection for xyz coordinates
-        self.pos_mlp = nn.Sequential(
-            nn.Conv1d(3, channels, 1, bias=False),
-            nn.BatchNorm1d(channels),
-            nn.ReLU(),
-            nn.Conv1d(channels, channels, 1, bias=False)
-        )
+        self.xyz_proj = nn.Conv1d(3, channels, 1, bias=False)
 
     def execute(self, x, xyz):
-        # 可学习的位置编码
-        pos_enc = self.pos_mlp(xyz)  # [B, channels, N]
-        x = x + pos_enc
+        # Project xyz to the same channel dimension as x
+        xyz_feat = self.xyz_proj(xyz)
+        
+        # Now we can safely add them
+        x = x + xyz_feat
         
         x_q = self.q_conv(x).permute(0, 2, 1) # b, n, c 
         x_k = self.k_conv(x)# b, c, n        

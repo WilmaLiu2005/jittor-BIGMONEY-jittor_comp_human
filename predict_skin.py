@@ -1,12 +1,12 @@
+import os
 import jittor as jt
 import numpy as np
-import os
 import argparse
 
 from dataset.asset import Asset
 from dataset.dataset import get_dataloader, transform
 from dataset.sampler import SamplerMix
-from models.new_skin import create_model1
+from models.skin import create_model
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -19,7 +19,7 @@ jt.flags.use_cuda = 1
 
 def predict(args):
     # Create model
-    model = create_model1(
+    model = create_model(
         model_name=args.model_name,
         model_type=args.model_type
     )

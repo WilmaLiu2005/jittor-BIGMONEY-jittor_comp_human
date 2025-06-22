@@ -1,0 +1,3 @@
+[submodule "ptv3"]
+	path = ptv3
+	url = git@github.com:Pointcept/PointTransformerV3.git

@@ -1,10 +1,10 @@
 import os
 import jittor as jt
 import numpy as np
+
 import argparse
 import time
 import random
-import matplotlib.pyplot as plt
 
 from jittor import nn
 from jittor import optim
@@ -15,6 +15,7 @@ from dataset.exporter import Exporter
 from models.skeleton import create_model
 
 from models.metrics import J2J
+import matplotlib.pyplot as plt
 
 # Set Jittor flags
 jt.flags.use_cuda = 1
@@ -294,12 +295,12 @@ def main():
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=1000,
                         help='Number of training epochs')
     parser.add_argument('--optimizer', type=str, default='adam',
                         choices=['sgd', 'adam'],
                         help='Optimizer to use')
-    parser.add_argument('--learning_rate', type=float, default=0.00001,
+    parser.add_argument('--learning_rate', type=float, default=0.00005,
                         help='Initial learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='Weight decay (L2 penalty)')

@@ -7,8 +7,7 @@ import sys
 from math import sqrt
 
 # Import the PCT model components
-from PCT.networks.cls.pct import Point_Transformer2
-
+from PCT.networks.cls.new_pct import PointTransformerV3
 
 class MLP(nn.Module):
     def __init__(self, input_dim: int, output_dim: int):
@@ -35,7 +34,7 @@ class SimpleSkinModel(nn.Module):
         self.num_joints = num_joints
         self.feat_dim = feat_dim
 
-        self.pct = Point_Transformer2(output_channels=feat_dim)
+        self.pct = PointTransformerV3(output_channels=feat_dim)
         self.joint_mlp = MLP(3 + feat_dim, feat_dim)
         self.vertex_mlp = MLP(3 + feat_dim, feat_dim)
         self.relu = nn.ReLU()
@@ -62,7 +61,7 @@ class SimpleSkinModel(nn.Module):
 
 
 # Factory function to create models
-def create_model1(model_name='pct', feat_dim=256, **kwargs):
+def create_model(model_name='pct', feat_dim=256, **kwargs):
     if model_name == "pct":
         return SimpleSkinModel(feat_dim=feat_dim, num_joints=22)
     raise NotImplementedError()

@@ -6,8 +6,7 @@ import numpy as np
 import sys
 
 # Import the PCT model components
-from PCT.networks.cls.pct_new import EnhancedPoint_Transformer
-
+from PCT.networks.cls.new_pct import PointTransformerV3
 class SimpleSkeletonModel(nn.Module):
     
     def __init__(self, feat_dim: int, output_channels: int):
@@ -15,8 +14,7 @@ class SimpleSkeletonModel(nn.Module):
         self.feat_dim           = feat_dim
         self.output_channels    = output_channels
         
-        # 使用新的增强Transformer模型，融合了层次化多尺度特征和结构先验知识
-        self.transformer = EnhancedPoint_Transformer(output_channels=feat_dim)
+        self.transformer = PointTransformerV3(output_channels=feat_dim)
         self.mlp = nn.Sequential(
             nn.Linear(feat_dim, 512),
             nn.BatchNorm1d(512),
