@@ -58,8 +58,8 @@ class SkeletonStructurePrior(nn.Module):
         self.feat_dim = feat_dim
         self.num_joints = num_joints
         
-        # 人体骨骼层次结构 (SMPL格式)
-        # 父子关系：每个关节的父关节索引，-1表示根关节
+        # Human skeletal hierarchy (SMPL format)
+        # Parent-child relationships: each joint's parent index; -1 indicates the root joint
         self.bone_hierarchy = jt.array([
             -1,  # 0: pelvis (root)
             0,   # 1: left_hip
@@ -84,24 +84,22 @@ class SkeletonStructurePrior(nn.Module):
             18,  # 20: left_wrist
             19,  # 21: right_wrist
         ])
-        
-        # 骨骼长度约束网络
+
         self.bone_length_predictor = nn.Sequential(
             nn.Linear(feat_dim, 256),
             nn.ReLU(),
             nn.Linear(256, num_joints),
-            nn.Softplus()  # 确保骨骼长度为正
+            nn.Softplus() 
         )
-        
-        # 关节角度约束网络
+
         self.joint_angle_predictor = nn.Sequential(
             nn.Linear(feat_dim, 512),
             nn.ReLU(),
-            nn.Linear(512, num_joints * 3),  # 每个关节3个角度
-            nn.Tanh()  # 限制角度范围
+            nn.Linear(512, num_joints * 3), 
+            nn.Tanh() 
         )
         
-        # 对称性约束
+        # Symmetry constraint
         self.symmetry_pairs = [
             (1, 2),   # left_hip, right_hip
             (4, 5),   # left_knee, right_knee
@@ -118,12 +116,10 @@ class SkeletonStructurePrior(nn.Module):
         B = joint_positions.shape[0]
         joint_pos = joint_positions.view(B, self.num_joints, 3)
         
-        # 预测理想骨骼长度
         predicted_lengths = self.bone_length_predictor(global_features)  # [B, num_joints]
         
-        # 计算实际骨骼长度
         bone_length_loss = 0.0
-        for i in range(1, self.num_joints):  # 跳过根关节
+        for i in range(1, self.num_joints):  
             parent_idx = self.bone_hierarchy[i]
             if parent_idx >= 0:
                 bone_vector = joint_pos[:, i] - joint_pos[:, parent_idx]
@@ -142,14 +138,14 @@ class SkeletonStructurePrior(nn.Module):
         for left_idx, right_idx in self.symmetry_pairs:
             left_pos = joint_pos[:, left_idx]
             right_pos = joint_pos[:, right_idx]
-            # 对称性约束：左右关节在x轴上应该对称
+            # Symmetry constraint: left and right joints should be symmetric along the x-axis
             left_mirrored = jt.stack([-left_pos[:, 0], left_pos[:, 1], left_pos[:, 2]], dim=1)
             symmetry_loss += jt.mean((left_mirrored - right_pos) ** 2)
         
         return symmetry_loss / len(self.symmetry_pairs)
 
 class SkeletonAttention(nn.Module):
-    """专门针对骨骼预测的注意力机制 - 简化版本"""
+    """专门针对骨骼预测的注意力机制 """
     def __init__(self, feat_dim, num_heads=8):
         super().__init__()
         self.feat_dim = feat_dim
@@ -157,8 +153,7 @@ class SkeletonAttention(nn.Module):
         self.head_dim = feat_dim // num_heads
         
         assert feat_dim % num_heads == 0
-        
-        # 多头注意力组件
+
         self.q_linear = nn.Linear(feat_dim, feat_dim, bias=False)
         self.k_linear = nn.Linear(feat_dim, feat_dim, bias=False)
         self.v_linear = nn.Linear(feat_dim, feat_dim, bias=False)
@@ -169,25 +164,22 @@ class SkeletonAttention(nn.Module):
         
     def execute(self, x):
         B, N, D = x.shape
-        
-        # 计算Q, K, V
+
         q = self.q_linear(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_linear(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_linear(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        # 计算注意力分数
+
         scores = jt.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.head_dim)
         attention = self.softmax(scores)
         attention = self.dropout(attention)
-        
-        # 应用注意力
+
         attended = jt.matmul(attention, v)
         attended = attended.transpose(1, 2).contiguous().view(B, N, D)
         
         return self.out_linear(attended)
 
 class ProgressiveSkeletonAttention(nn.Module):
-    """渐进式骨骼注意力模块 - 参照pct_new.py实现"""
+    """渐进式骨骼注意力模块"""
     def __init__(self, in_channels, out_channels, num_heads=8):
         super().__init__()
         self.in_channels = in_channels
@@ -196,44 +188,35 @@ class ProgressiveSkeletonAttention(nn.Module):
         self.head_dim = out_channels // num_heads
         
         assert out_channels % num_heads == 0
-        
-        # 多头注意力组件
+
         self.q_conv = nn.Conv1d(in_channels, out_channels, 1, bias=False)
         self.k_conv = nn.Conv1d(in_channels, out_channels, 1, bias=False)
         self.v_conv = nn.Conv1d(in_channels, out_channels, 1)
-        
-        # 位置编码
+
         self.pos_encoding = nn.Conv1d(3, out_channels, 1, bias=False)
-        
-        # 输出投影
+
         self.output_conv = nn.Conv1d(out_channels, out_channels, 1)
         self.norm = nn.BatchNorm1d(out_channels)
         self.relu = nn.ReLU()
-        
-        # 软注意力
         self.softmax = nn.Softmax(dim=-1)
         
     def execute(self, x, xyz):
         B, C, N = x.shape
         
-        # 添加位置编码
+        # Add positional encoding
         pos_feat = self.pos_encoding(xyz)
         x_with_pos = x + pos_feat
-        
-        # 计算查询、键、值
+
         q = self.q_conv(x_with_pos).view(B, self.num_heads, self.head_dim, N)
         k = self.k_conv(x_with_pos).view(B, self.num_heads, self.head_dim, N)  
         v = self.v_conv(x_with_pos).view(B, self.num_heads, self.head_dim, N)
-        
-        # 计算注意力分数
+
         attention_scores = jt.matmul(q.transpose(2, 3), k) / np.sqrt(self.head_dim)
         attention_weights = self.softmax(attention_scores)
-        
-        # 应用注意力
+
         attended = jt.matmul(v, attention_weights.transpose(2, 3))
         attended = attended.view(B, self.out_channels, N)
-        
-        # 输出投影和残差连接
+
         output = self.output_conv(attended)
         if self.in_channels == self.out_channels:
             output = output + x
@@ -242,13 +225,12 @@ class ProgressiveSkeletonAttention(nn.Module):
         return output
 
 class CrossScaleSkeletonAttention(nn.Module):
-    """跨尺度骨骼注意力机制 - 参照pct_new.py实现"""
+    """跨尺度骨骼注意力机制"""
     def __init__(self, channels, num_scales=3):
         super().__init__()
         self.num_scales = num_scales
         self.channels = channels
-        
-        # 多尺度查询、键、值投影
+
         self.scale_projections = nn.ModuleList([
             nn.Sequential(
                 nn.Conv1d(channels, channels, 1, bias=False),
@@ -257,14 +239,13 @@ class CrossScaleSkeletonAttention(nn.Module):
             ) for _ in range(num_scales)
         ])
         
-        # 跨尺度融合
+        # cross-scale fusion
         self.cross_scale_fusion = nn.Sequential(
             nn.Conv1d(channels * num_scales, channels, 1, bias=False),
             nn.BatchNorm1d(channels),
             nn.ReLU()
         )
         
-        # 使用普通的初始化替代gauss
         self.attention_weights = jt.randn((num_scales, num_scales)) * 0.1
         self.softmax = nn.Softmax(dim=-1)
         
@@ -274,11 +255,11 @@ class CrossScaleSkeletonAttention(nn.Module):
         if current_size == target_size:
             return feat
         elif current_size > target_size:
-            # 下采样
+
             step = current_size // target_size
             return feat[:, :, ::step][:, :, :target_size]
         else:
-            # 上采样 (简单重复)
+
             repeat_factor = target_size // current_size
             remainder = target_size % current_size
             upsampled = feat.repeat_interleave(repeat_factor, dim=2)
@@ -291,41 +272,38 @@ class CrossScaleSkeletonAttention(nn.Module):
         scale_features: list of [B, C, N_i] tensors from different scales
         """
         B = scale_features[0].shape[0]
-        target_size = 256  # 统一目标尺寸
+        target_size = 256  
         
-        # 投影每个尺度的特征
+
         projected_features = []
         for i, (feat, proj) in enumerate(zip(scale_features, self.scale_projections)):
             projected_feat = proj(feat)
-            # 调整到统一尺寸
+
             resized_feat = self.adaptive_resize(projected_feat, target_size)
             projected_features.append(resized_feat)
         
-        # 跨尺度注意力权重
+
         attention_matrix = self.softmax(self.attention_weights)
-        
-        # 融合跨尺度特征
+
         fused_features = []
         for i, feat_i in enumerate(projected_features):
             weighted_feat = jt.zeros_like(feat_i)
             for j, feat_j in enumerate(projected_features):
                 weighted_feat += attention_matrix[i, j] * feat_j
             fused_features.append(weighted_feat)
-        
-        # 最终融合
+
         all_features = concat(fused_features, dim=1)
         final_features = self.cross_scale_fusion(all_features)
         
         return final_features
 
 class SkeletonTransformer(nn.Module):
-    """专门针对骨骼预测的Transformer模型 - 简化版本"""
+    """专门针对骨骼预测的Transformer模型"""
     def __init__(self, output_channels=256, num_joints=22):
         super().__init__()
         self.output_channels = output_channels
         self.num_joints = num_joints
         
-        # 初始特征提取
         self.initial_conv = nn.Sequential(
             nn.Conv1d(3, 128, 1, bias=False),
             nn.BatchNorm1d(128),
@@ -335,37 +313,35 @@ class SkeletonTransformer(nn.Module):
             nn.ReLU()
         )
         
-        # 多尺度渐进式特征提取
-        # Level 1: 全分辨率 (1024 points)
+        # Multi-scale progressive feature extraction
+        # Level 1: Full resolution (1024 points)
         self.level1_attention = nn.ModuleList([
             ProgressiveSkeletonAttention(256, 256, num_heads=8)
             for _ in range(2)
         ])
         
-        # Level 2: 中等分辨率 (512 points)  
+        # Level 2: Medium resolution (512 points)  
         self.level2_transform = nn.Conv1d(259, 384, 1, bias=False)
         self.level2_attention = nn.ModuleList([
             ProgressiveSkeletonAttention(384, 384, num_heads=8)
             for _ in range(3)
         ])
         
-        # Level 3: 低分辨率 (256 points)
+        # Level 3: Low resolution (256 points)
         self.level3_transform = nn.Conv1d(387, 512, 1, bias=False)
         self.level3_attention = nn.ModuleList([
             ProgressiveSkeletonAttention(512, 512, num_heads=8)
             for _ in range(4)
         ])
-        
-        # 维度转换层
+
+
         self.dim_reduction_2 = nn.Conv1d(384, 256, 1, bias=False)
         self.dim_reduction_3 = nn.Conv1d(512, 256, 1, bias=False)
         
-        # 跨尺度注意力融合
         self.cross_scale_attention = CrossScaleSkeletonAttention(
             channels=256, num_scales=3
         )
-        
-        # 特征融合和输出
+
         self.feature_fusion = nn.Sequential(
             nn.Conv1d(256, 512, 1, bias=False),
             nn.BatchNorm1d(512),
@@ -374,8 +350,7 @@ class SkeletonTransformer(nn.Module):
             nn.BatchNorm1d(1024),
             nn.ReLU()
         )
-        
-        # 全局特征提取
+
         self.global_feature_extractor = nn.Sequential(
             nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
@@ -413,49 +388,40 @@ class SkeletonTransformer(nn.Module):
         vertices: [B, 3, N] - 输入点云
         """
         B, _, N = vertices.shape
-        
-        # 初始特征提取
+
         x = self.initial_conv(vertices)  # [B, 256, N]
         xyz = vertices  # [B, 3, N]
-        
-        # Level 1: 全分辨率处理
+
         x1 = x
         for attention_layer in self.level1_attention:
             x1 = attention_layer(x1, xyz)
-        
-        # 下采样到Level 2 (512 points)
+
         xyz_512, x1_grouped = sample_and_group(512, 32, xyz.permute(0,2,1), x1.permute(0,2,1))
         x2 = x1_grouped.mean(dim=2).permute(0, 2, 1)  # [B, 259, 512]
         x2 = self.level2_transform(x2)  # [B, 384, 512]
         
         for attention_layer in self.level2_attention:
             x2 = attention_layer(x2, xyz_512.permute(0,2,1))
-        
-        # 下采样到Level 3 (256 points)
+
         xyz_256, x2_grouped = sample_and_group(256, 32, xyz_512, x2.permute(0,2,1))
         x3 = x2_grouped.mean(dim=2).permute(0, 2, 1)  # [B, 387, 256]
         x3 = self.level3_transform(x3)  # [B, 512, 256]
         
         for attention_layer in self.level3_attention:
             x3 = attention_layer(x3, xyz_256.permute(0,2,1))
-        
-        # 统一特征维度用于跨尺度注意力
+
         x1_pooled = self.adaptive_pool_1d(x1, 256)  # [B, 256, 256]
         x2_reduced = self.dim_reduction_2(x2)  # [B, 256, 512] 
         x2_pooled = self.adaptive_pool_1d(x2_reduced, 256)  # [B, 256, 256]
         x3_reduced = self.dim_reduction_3(x3)  # [B, 256, 256]
-        
-        # 跨尺度注意力融合
+
         scale_features = [x1_pooled, x2_pooled, x3_reduced]
         fused_features = self.cross_scale_attention(scale_features)  # [B, 256, 256]
-        
-        # 特征融合
+
         fused_features = self.feature_fusion(fused_features)  # [B, 1024, 256]
         
-        # 全局池化
         global_feat = jt.max(fused_features, 2)  # [B, 1024]
-        
-        # 全局特征
+
         global_output = self.global_feature_extractor(global_feat)  # [B, output_channels]
         
         return global_output
@@ -472,7 +438,7 @@ class SkeletonPoint_Transformer(nn.Module):
         """
         return self.skeleton_transformer(x)
 
-# Point Cloud Serialization - PTv3核心创新
+# Point Cloud Serialization
 class PointCloudSerialization(nn.Module):
     """点云序列化模块 - 基于PTv3的空间填充曲线"""
     def __init__(self, grid_size=0.02):
@@ -482,16 +448,13 @@ class PointCloudSerialization(nn.Module):
     def z_order_encode(self, xyz):
         """Z-order空间填充曲线编码"""
         B, N, _ = xyz.shape
-        
-        # 量化坐标到网格
+
         grid_coords = (xyz / self.grid_size).int()
-        
-        # Z-order编码
+
         x, y, z = grid_coords[..., 0], grid_coords[..., 1], grid_coords[..., 2]
-        
-        # 简化的Z-order编码实现
+
         code = jt.zeros_like(x)
-        for i in range(16):  # 假设16位足够
+        for i in range(16): 
             mask = 1 << i
             code |= ((x & mask) << (2*i)) | ((y & mask) << (2*i+1)) | ((z & mask) << (2*i+2))
             
@@ -499,7 +462,6 @@ class PointCloudSerialization(nn.Module):
     
     def hilbert_encode(self, xyz):
         """Hilbert曲线编码（简化版本）"""
-        # 简化实现，实际应用中可以使用更复杂的Hilbert编码
         return self.z_order_encode(xyz)
     
     def execute(self, xyz, pattern='z'):
@@ -513,12 +475,10 @@ class PointCloudSerialization(nn.Module):
             codes = self.hilbert_encode(xyz)
         else:
             codes = self.z_order_encode(xyz)
-            
-        # 根据编码排序
+
         sorted_indices = jt.argsort(codes, dim=-1)
         return sorted_indices
 
-# xCPE - PTv3高效位置编码
 class xCPE(nn.Module):
     """高效条件位置编码 - 基于PTv3设计"""
     def __init__(self, in_channels, out_channels):
@@ -526,7 +486,7 @@ class xCPE(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
         
-        # 使用1D卷积模拟稀疏卷积
+        # use 1D convolution simulate sparse convolution
         self.pos_conv = nn.Sequential(
             nn.Conv1d(3, out_channels // 2, 1, bias=False),
             nn.BatchNorm1d(out_channels // 2),
@@ -545,7 +505,6 @@ class xCPE(nn.Module):
         x: [B, C, N] 特征
         xyz: [B, 3, N] 坐标
         """
-        # 位置编码
         pos_encoding = self.pos_conv(xyz)
         
         # Skip connection
@@ -554,7 +513,7 @@ class xCPE(nn.Module):
             
         return x + pos_encoding
 
-# Patch Attention - PTv3核心注意力机制
+# Patch Attention
 class PatchAttention(nn.Module):
     """基于Patch的注意力机制 - PTv3风格"""
     def __init__(self, channels, num_heads=8, patch_size=64):
@@ -565,14 +524,12 @@ class PatchAttention(nn.Module):
         self.head_dim = channels // num_heads
         
         assert channels % num_heads == 0
-        
-        # 简化的dot-product attention
+
         self.q_conv = nn.Conv1d(channels, channels, 1, bias=False)
         self.k_conv = nn.Conv1d(channels, channels, 1, bias=False) 
         self.v_conv = nn.Conv1d(channels, channels, 1, bias=False)
         self.out_conv = nn.Conv1d(channels, channels, 1)
-        
-        # 移除未使用的LayerNorm
+
         # self.norm = nn.LayerNorm(channels)
         self.softmax = nn.Softmax(dim=-1)
         
@@ -609,44 +566,34 @@ class PatchAttention(nn.Module):
         """
         B, C, N = x.shape
         original_N = N
-        
-        # Patch partition
-        x_patches, pad_size = self.patch_partition(x)  # [B, C, num_patches, patch_size]
+
+        x_patches, pad_size = self.patch_partition(x) 
         B, C, num_patches, patch_size = x_patches.shape
-        
-        # Reshape for attention: [B*num_patches, C, patch_size]
+
         x_flat = x_patches.view(B * num_patches, C, patch_size)
-        
-        # Compute Q, K, V
-        q = self.q_conv(x_flat)  # [B*num_patches, C, patch_size]
+
+        q = self.q_conv(x_flat)
         k = self.k_conv(x_flat)
         v = self.v_conv(x_flat)
-        
-        # Multi-head attention
-        q = q.view(B * num_patches, self.num_heads, self.head_dim, patch_size).permute(0, 1, 3, 2)  # [B*num_patches, heads, patch_size, head_dim]
+
+        q = q.view(B * num_patches, self.num_heads, self.head_dim, patch_size).permute(0, 1, 3, 2) 
         k = k.view(B * num_patches, self.num_heads, self.head_dim, patch_size).permute(0, 1, 3, 2)
         v = v.view(B * num_patches, self.num_heads, self.head_dim, patch_size).permute(0, 1, 3, 2)
-        
-        # Attention scores
-        scores = jt.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.head_dim)  # [B*num_patches, heads, patch_size, patch_size]
+
+        scores = jt.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.head_dim) 
         attention = self.softmax(scores)
-        
-        # Apply attention
-        attended = jt.matmul(attention, v)  # [B*num_patches, heads, patch_size, head_dim]
+
+        attended = jt.matmul(attention, v) 
         attended = attended.permute(0, 1, 3, 2).contiguous().view(B * num_patches, C, patch_size)
-        
-        # Output projection
-        output = self.out_conv(attended)  # [B*num_patches, C, patch_size]
-        
-        # Reshape back to patches
+
+        output = self.out_conv(attended)  
+
         output_patches = output.view(B, C, num_patches, patch_size)
-        
-        # Merge patches
+
         output = self.patch_merge(output_patches, pad_size, original_N)
         
         return output
 
-# Shift Patch Interaction - PTv3 patch交互机制
 class ShiftPatchInteraction(nn.Module):
     """Shift Patch交互模块"""
     def __init__(self, channels, patch_size=64):
@@ -678,24 +625,19 @@ class ShiftPatchInteraction(nn.Module):
         
         return out1 + out2
 
-# PTv3 Style Transformer Block
 class PTv3TransformerBlock(nn.Module):
     """PTv3风格的Transformer块"""
     def __init__(self, channels, num_heads=8, patch_size=64, mlp_ratio=4):
         super().__init__()
         self.channels = channels
-        
-        # xCPE位置编码
+
         self.pos_encoding = xCPE(channels, channels)
-        
-        # Patch attention with shift interaction
+
         self.attention = ShiftPatchInteraction(channels, patch_size)
-        
-        # 使用BatchNorm替代LayerNorm避免维度问题
+
         self.norm1 = nn.BatchNorm1d(channels)
         self.norm2 = nn.BatchNorm1d(channels)
-        
-        # MLP
+ 
         mlp_hidden = int(channels * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Conv1d(channels, mlp_hidden, 1),
@@ -708,35 +650,33 @@ class PTv3TransformerBlock(nn.Module):
         x: [B, C, N] 特征
         xyz: [B, 3, N] 坐标
         """
-        # 位置编码
+
         x = self.pos_encoding(x, xyz)
         
         # Self-attention with residual
         residual = x
-        x = self.norm1(x)  # [B, C, N] 直接使用BatchNorm1d
+        x = self.norm1(x) 
         x = self.attention(x)
         x = residual + x
         
         # MLP with residual
         residual = x
-        x = self.norm2(x)  # [B, C, N] 直接使用BatchNorm1d
+        x = self.norm2(x) 
         x = self.mlp(x)
         x = residual + x
         
         return x
 
-# PTv3 Style Skeleton Transformer
+
 class PTv3SkeletonTransformer(nn.Module):
     """基于PTv3设计的骨骼预测Transformer"""
     def __init__(self, output_channels=256, num_joints=22):
         super().__init__()
         self.output_channels = output_channels
         self.num_joints = num_joints
-        
-        # Point cloud serialization
+
         self.serialization = PointCloudSerialization()
-        
-        # Initial feature extraction
+
         self.stem = nn.Sequential(
             nn.Conv1d(3, 32, 1, bias=False),
             nn.BatchNorm1d(32),
@@ -748,20 +688,18 @@ class PTv3SkeletonTransformer(nn.Module):
             nn.BatchNorm1d(128),
             nn.ReLU()
         )
-        
-        # U-Net style encoder (PTv3风格)
+
         self.encoder_layers = nn.ModuleList([
-            # Stage 1: [B, 128, N] -> [B, 128, N]
             nn.ModuleList([
                 PTv3TransformerBlock(128, patch_size=128),
                 PTv3TransformerBlock(128, patch_size=128)
             ]),
-            # Stage 2: [B, 256, N//2] -> [B, 256, N//2] 
+
             nn.ModuleList([
                 PTv3TransformerBlock(256, patch_size=64),
                 PTv3TransformerBlock(256, patch_size=64)
             ]),
-            # Stage 3: [B, 512, N//4] -> [B, 512, N//4]
+
             nn.ModuleList([
                 PTv3TransformerBlock(512, patch_size=32),
                 PTv3TransformerBlock(512, patch_size=32),
@@ -770,7 +708,7 @@ class PTv3SkeletonTransformer(nn.Module):
                 PTv3TransformerBlock(512, patch_size=32),
                 PTv3TransformerBlock(512, patch_size=32)
             ]),
-            # Stage 4: [B, 512, N//8] -> [B, 512, N//8]
+
             nn.ModuleList([
                 PTv3TransformerBlock(512, patch_size=16),
                 PTv3TransformerBlock(512, patch_size=16)
@@ -779,13 +717,12 @@ class PTv3SkeletonTransformer(nn.Module):
         
         # Downsampling layers
         self.downsample_layers = nn.ModuleList([
-            nn.Conv1d(128, 256, 1, bias=False),  # Stage 1->2
-            nn.Conv1d(256, 512, 1, bias=False),  # Stage 2->3  
-            nn.Conv1d(512, 512, 1, bias=False),  # Stage 3->4
+            nn.Conv1d(128, 256, 1, bias=False),  
+            nn.Conv1d(256, 512, 1, bias=False),  
+            nn.Conv1d(512, 512, 1, bias=False),  
         ])
         
-        # 替换AdaptiveAvgPool1d为手动实现
-        # self.global_pool = nn.AdaptiveAvgPool1d(1)  # 这行有问题
+
         self.final_mlp = nn.Sequential(
             nn.Linear(512, 512),
             nn.BatchNorm1d(512),
@@ -818,32 +755,22 @@ class PTv3SkeletonTransformer(nn.Module):
         """
         B, _, N = vertices.shape
         xyz = vertices
-        
-        # Point cloud serialization (可选，用于后续优化)
-        # serialization_indices = self.serialization(xyz.permute(0, 2, 1))
-        
-        # Initial feature extraction
-        x = self.stem(vertices)  # [B, 128, N]
-        
-        # Multi-stage encoding
+
+        x = self.stem(vertices)
+
         stage_features = []
         
         for stage_idx, stage_layers in enumerate(self.encoder_layers):
-            # Apply transformer blocks
             for layer in stage_layers:
                 x = layer(x, xyz)
             
             stage_features.append(x)
-            
-            # Downsampling (except for last stage)
+
             if stage_idx < len(self.downsample_layers):
                 x = self.downsample_layers[stage_idx](x)
                 x, xyz = self.grid_pool(x, xyz, scale_factor=2)
-        
-        # Global feature extraction - 使用手动实现的全局平均池化
-        global_feat = self.global_avg_pool_1d(x)  # [B, 512]
-        
-        # Final prediction
-        output = self.final_mlp(global_feat)  # [B, output_channels]
-        
+
+        global_feat = self.global_avg_pool_1d(x)
+
+        output = self.final_mlp(global_feat) 
         return output 
